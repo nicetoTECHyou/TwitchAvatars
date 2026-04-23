@@ -1,9 +1,9 @@
 // ============================================================================
-// Avatar Stream System - Server v0.0.2
+// Avatar Stream System - Server v0.0.3
+// Twitch-only, Kick entfernt, robuste Event-Kommunikation
 // ============================================================================
 const fs = require('fs');
 const path = require('path');
-const https = require('https');
 const express = require('express');
 const http = require('http');
 const { Server: SocketServer } = require('socket.io');
@@ -20,11 +20,10 @@ function saveConfig() {
 }
 
 // ---------------------------------------------------------------------------
-// Connection Status (shared state)
+// Connection Status
 // ---------------------------------------------------------------------------
 const connStatus = {
-  twitch: { connected: false, channel: '', error: null },
-  kick: { connected: false, channel: '', error: null, mode: 'simulator' }
+  twitch: { connected: false, channel: '', error: null }
 };
 
 function broadcastStatus() {
@@ -53,7 +52,7 @@ app.get('/admin', (_req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Avatar State
+// Avatar State (Server-seitig)
 // ---------------------------------------------------------------------------
 const avatars = new Map();
 let battleRoyaleActive = false;
@@ -76,6 +75,7 @@ const NAMED_COLORS = {
 function createAvatar(username, platform = 'twitch') {
   const key = username.toLowerCase();
   if (avatars.has(key)) {
+    console.log(`[Avatar] ${username} existiert bereits`);
     return avatars.get(key);
   }
 
@@ -84,40 +84,48 @@ function createAvatar(username, platform = 'twitch') {
     id: key,
     username: username,
     platform: platform,
-    x: 100 + Math.random() * (config.overlay.width - 200),
-    y: config.overlay.height - 100 - config.avatar.size,
-    vx: (Math.random() - 0.5) * config.avatar.defaultSpeed * 2,
-    vy: 0,
-    width: config.avatar.size,
-    height: config.avatar.size,
     color: AVATAR_COLORS[colorIndex],
     hp: 100,
     maxHp: 100,
-    isJumping: false,
-    jumpStartTime: 0,
-    direction: Math.random() > 0.5 ? 1 : -1,
     state: 'idle',
-    animFrame: 0,
-    animTimer: 0,
-    attackCooldown: 0,
-    targetId: null,
-    spawnTime: Date.now(),
-    spriteName: null,
     speed: config.avatar.defaultSpeed,
+    width: config.avatar.size,
+    height: config.avatar.size,
+    direction: Math.random() > 0.5 ? 1 : -1,
+    spawnTime: Date.now(),
+    isJumping: false,
     emote: null,
-    emoteTimer: 0
+    emoteTimer: 0,
+    attackCooldown: 0,
+    targetId: null
   };
 
   avatars.set(key, avatar);
-  broadcastState();
+
+  // Sende Spawn-Event an Overlay (mit relativer Position 0-1)
+  const spawnData = {
+    ...avatar,
+    xRatio: 0.1 + Math.random() * 0.8,  // 10%-90% der Canvas-Breite
+    yRatio: 0                             // Am Boden (Overlay berechnet Ground-Y selbst)
+  };
+
+  console.log(`[Avatar] ${username} gespawnt (Farbe: ${avatar.color}, Platform: ${platform})`);
+  io.emit('avatarSpawn', spawnData);
+  io.emit('avatarJoined', {
+    username,
+    platform,
+    color: avatar.color
+  });
+
   return avatar;
 }
 
 function removeAvatar(username) {
   const key = username.toLowerCase();
   if (avatars.has(key)) {
+    console.log(`[Avatar] ${username} entfernt`);
     avatars.delete(key);
-    broadcastState();
+    io.emit('avatarRemove', { id: key, username });
   }
 }
 
@@ -128,9 +136,8 @@ function startBattleRoyale() {
   if (avatars.size < 2) return false;
   battleRoyaleActive = true;
   battleRoyaleZone = {
-    x: 0, y: 0,
-    width: config.overlay.width,
-    height: config.overlay.height
+    xRatio: 0, yRatio: 0,
+    widthRatio: 1, heightRatio: 1
   };
 
   for (const avatar of avatars.values()) {
@@ -139,13 +146,13 @@ function startBattleRoyale() {
     avatar.state = 'idle';
     avatar.targetId = null;
     avatar.attackCooldown = 0;
-    avatar.x = 100 + Math.random() * (config.overlay.width - 200);
-    avatar.y = config.overlay.height - 100 - avatar.height;
-    avatar.vx = (Math.random() - 0.5) * 4;
+    avatar.isJumping = false;
+    avatar.emote = null;
+    avatar.emoteTimer = 0;
   }
 
   io.emit('battleRoyaleStart', { zone: battleRoyaleZone });
-  broadcastState();
+  console.log(`[BR] Battle Royale gestartet mit ${avatars.size} Avataren`);
   return true;
 }
 
@@ -160,23 +167,23 @@ function stopBattleRoyale() {
     }
   }
   io.emit('battleRoyaleEnd');
-  broadcastState();
+  console.log('[BR] Battle Royale beendet');
 }
 
 function nukeAll() {
-  const explosionEffects = [];
+  const explosionList = [];
   for (const avatar of avatars.values()) {
-    explosionEffects.push({ x: avatar.x, y: avatar.y, color: avatar.color });
+    explosionList.push({ id: avatar.id, color: avatar.color });
   }
   avatars.clear();
   battleRoyaleActive = false;
   battleRoyaleZone = null;
-  io.emit('nuke', { explosions: explosionEffects });
-  broadcastState();
+  io.emit('nuke', { explosions: explosionList });
+  console.log('[NUKE] Alle Avatare vernichtet');
 }
 
 // ---------------------------------------------------------------------------
-// Chat Command Handler (EXPANDED)
+// Chat Command Handler
 // ---------------------------------------------------------------------------
 function handleChatCommand(username, command, platform) {
   const rawCmd = command.trim();
@@ -184,50 +191,62 @@ function handleChatCommand(username, command, platform) {
   const cmd = parts[0].toLowerCase();
   const args = parts.slice(1);
 
-  // Log every chat message for visibility
+  // Logge alle Befehle
   if (cmd.startsWith('!')) {
+    console.log(`[Chat] [${platform}] ${username}: ${rawCmd}`);
     io.emit('chatMessage', { username, command: rawCmd, platform, timestamp: Date.now() });
   }
 
   // --- !join ---
-  if (cmd === config.commands.join) {
-    const avatar = createAvatar(username, platform);
-    io.emit('avatarJoined', { username, platform, color: avatar.color, x: avatar.x, y: avatar.y });
+  if (cmd === '!join') {
+    createAvatar(username, platform);
     return;
   }
 
-  // All commands below require an existing avatar
-  const avatar = avatars.get(username.toLowerCase());
-  if (!avatar || avatar.state === 'dead') return;
+  // Alle weiteren Befehle erfordern existierenden Avatar
+  const key = username.toLowerCase();
+  const avatar = avatars.get(key);
+  if (!avatar) {
+    // Avatar existiert nicht — ignoriere Befehl (ausser !join)
+    return;
+  }
+  if (avatar.state === 'dead' && cmd !== '!reset' && cmd !== '!leave') return;
 
   switch (cmd) {
     // --- !jump ---
-    case config.commands.jump:
+    case '!jump':
+    case '!springen':
       if (!avatar.isJumping) {
         avatar.isJumping = true;
-        avatar.jumpStartTime = Date.now();
         avatar.state = 'jumping';
-        io.emit('avatarJumped', { username: avatar.username });
+        io.emit('avatarAction', { id: key, action: 'jump', username: avatar.username });
+        console.log(`[Action] ${username} springt`);
       }
       break;
 
     // --- !attack ---
-    case config.commands.attack:
+    case '!attack':
+    case '!angriff':
       if (battleRoyaleActive && avatar.attackCooldown <= 0) {
         avatar.state = 'attacking';
         avatar.attackCooldown = config.battleRoyale.attackCooldown;
+        io.emit('avatarAction', { id: key, action: 'attack', username: avatar.username });
         setTimeout(() => {
           if (avatar.state === 'attacking') avatar.state = 'idle';
         }, 300);
+        console.log(`[Action] ${username} greift an`);
       }
       break;
 
     // --- !dance ---
-    case config.commands.dance:
+    case '!dance':
+    case '!tanzen':
       avatar.state = 'dancing';
+      io.emit('avatarAction', { id: key, action: 'dance', username: avatar.username });
       setTimeout(() => {
         if (avatar.state === 'dancing') avatar.state = 'idle';
       }, 3000);
+      console.log(`[Action] ${username} tanzt`);
       break;
 
     // --- !color <color> ---
@@ -235,22 +254,27 @@ function handleChatCommand(username, command, platform) {
     case '!farbe':
       if (args.length > 0) {
         const colorArg = args[0].toLowerCase();
+        let newColor = null;
         if (NAMED_COLORS[colorArg]) {
-          avatar.color = NAMED_COLORS[colorArg];
+          newColor = NAMED_COLORS[colorArg];
         } else if (/^#[0-9a-f]{3,8}$/i.test(colorArg)) {
-          avatar.color = colorArg;
+          newColor = colorArg;
         } else if (/^[0-9a-f]{6}$/i.test(colorArg)) {
-          avatar.color = '#' + colorArg;
+          newColor = '#' + colorArg;
+        }
+        if (newColor) {
+          avatar.color = newColor;
+          io.emit('avatarAction', { id: key, action: 'color', color: newColor, username: avatar.username });
+          console.log(`[Action] ${username} Farbe: ${newColor}`);
         }
       }
       break;
 
-    // --- !leave / !leave ---
+    // --- !leave ---
     case '!leave':
     case '!quit':
     case '!raus':
       removeAvatar(username);
-      io.emit('avatarLeft', { username });
       break;
 
     // --- !heal ---
@@ -260,6 +284,8 @@ function handleChatCommand(username, command, platform) {
         avatar.hp = Math.min(avatar.maxHp, avatar.hp + 20);
         avatar.emote = '+20 HP';
         avatar.emoteTimer = 1000;
+        io.emit('avatarAction', { id: key, action: 'heal', hp: avatar.hp, username: avatar.username });
+        console.log(`[Action] ${username} heilt (+20 HP → ${avatar.hp})`);
       }
       break;
 
@@ -270,7 +296,8 @@ function handleChatCommand(username, command, platform) {
         const spd = parseInt(args[0]);
         if (spd >= 1 && spd <= 5) {
           avatar.speed = config.avatar.defaultSpeed * spd;
-          avatar.vx = Math.sign(avatar.vx || 1) * avatar.speed;
+          io.emit('avatarAction', { id: key, action: 'speed', speed: avatar.speed, username: avatar.username });
+          console.log(`[Action] ${username} Tempo: ${spd}`);
         }
       }
       break;
@@ -281,6 +308,8 @@ function handleChatCommand(username, command, platform) {
       const newSize = Math.min(128, avatar.width + 8);
       avatar.width = newSize;
       avatar.height = newSize;
+      io.emit('avatarAction', { id: key, action: 'grow', width: newSize, height: newSize, username: avatar.username });
+      console.log(`[Action] ${username} wächst (${newSize}px)`);
       break;
     }
 
@@ -290,6 +319,8 @@ function handleChatCommand(username, command, platform) {
       const shrinkSize = Math.max(24, avatar.width - 8);
       avatar.width = shrinkSize;
       avatar.height = shrinkSize;
+      io.emit('avatarAction', { id: key, action: 'shrink', width: shrinkSize, height: shrinkSize, username: avatar.username });
+      console.log(`[Action] ${username} schrumpft (${shrinkSize}px)`);
       break;
     }
 
@@ -299,25 +330,30 @@ function handleChatCommand(username, command, platform) {
       avatar.state = 'waving';
       avatar.emote = 'Wink!';
       avatar.emoteTimer = 1500;
+      io.emit('avatarAction', { id: key, action: 'wave', username: avatar.username });
       setTimeout(() => {
         if (avatar.state === 'waving') avatar.state = 'idle';
       }, 1500);
+      console.log(`[Action] ${username} winkt`);
       break;
 
     // --- !sit ---
     case '!sit':
     case '!setzen':
       avatar.state = 'sitting';
-      avatar.vx = 0;
+      io.emit('avatarAction', { id: key, action: 'sit', username: avatar.username });
       setTimeout(() => {
         if (avatar.state === 'sitting') avatar.state = 'idle';
       }, 3000);
+      console.log(`[Action] ${username} setzt sich`);
       break;
 
     // --- !flip ---
     case '!flip':
     case '!drehen':
       avatar.direction *= -1;
+      io.emit('avatarAction', { id: key, action: 'flip', direction: avatar.direction, username: avatar.username });
+      console.log(`[Action] ${username} dreht sich`);
       break;
 
     // --- !emote <text> ---
@@ -326,6 +362,8 @@ function handleChatCommand(username, command, platform) {
       if (args.length > 0) {
         avatar.emote = args.join(' ').substring(0, 30);
         avatar.emoteTimer = 2500;
+        io.emit('avatarAction', { id: key, action: 'emote', emote: avatar.emote, username: avatar.username });
+        console.log(`[Action] ${username} Emote: ${avatar.emote}`);
       }
       break;
 
@@ -337,15 +375,20 @@ function handleChatCommand(username, command, platform) {
       avatar.height = config.avatar.size;
       avatar.speed = config.avatar.defaultSpeed;
       avatar.state = 'idle';
+      avatar.isJumping = false;
       avatar.color = AVATAR_COLORS[avatars.size % AVATAR_COLORS.length];
+      avatar.emote = null;
+      avatar.emoteTimer = 0;
+      avatar.attackCooldown = 0;
+      avatar.targetId = null;
+      io.emit('avatarAction', { id: key, action: 'reset', avatar: avatar, username: avatar.username });
+      console.log(`[Action] ${username} zurückgesetzt`);
       break;
   }
-
-  broadcastState();
 }
 
 // ---------------------------------------------------------------------------
-// Twitch Chat (tmi.js) — FIXED: anonymous login with justinfan identity
+// Twitch Chat (tmi.js) — Anonymer Lese-Modus
 // ---------------------------------------------------------------------------
 let twitchClient = null;
 
@@ -361,17 +404,20 @@ function connectTwitch() {
     return;
   }
 
-  // IMPORTANT: Anonymous login requires a justinfan username + dummy oauth
+  // Anonymer Login: justinfan + dummy oauth (kein Token noetig!)
+  const anonUser = 'justinfan' + Math.floor(Math.random() * 99999);
+  console.log(`[Twitch] Verbinde als ${anonUser} zu Kanälen: ${channels.join(', ')}`);
+
   twitchClient = new tmi.Client({
-    options: { debug: false, messagesLogLevel: 'info' },
+    options: { debug: false },
     connection: {
       reconnect: true,
       reconnectInterval: 3000,
-      maxReconnectAttempts: 10,
+      maxReconnectAttempts: 15,
       secure: true
     },
     identity: {
-      username: 'justinfan' + Math.floor(Math.random() * 99999),
+      username: anonUser,
       password: 'oauth:1234567890'
     },
     channels: channels.map(c => c.startsWith('#') ? c : '#' + c)
@@ -380,37 +426,38 @@ function connectTwitch() {
   twitchClient.on('message', (channel, tags, message, self) => {
     if (self) return;
     const username = tags['display-name'] || tags.username || 'Unknown';
+    console.log(`[Twitch] ${username} in ${channel}: ${message}`);
     handleChatCommand(username, message, 'twitch');
   });
 
   twitchClient.on('connected', (addr, port) => {
-    console.log('[Twitch] Connected to', addr, port, '- Channels:', channels.join(', '));
+    console.log(`[Twitch] Verbunden mit ${addr}:${port} — Kanäle: ${channels.join(', ')}`);
     connStatus.twitch = { connected: true, channel: channels.join(', '), error: null };
     broadcastStatus();
   });
 
   twitchClient.on('disconnected', (reason) => {
-    console.log('[Twitch] Disconnected:', reason);
-    connStatus.twitch = { connected: false, channel: channels.join(', '), error: reason || 'Disconnected' };
+    console.log('[Twitch] Getrennt:', reason);
+    connStatus.twitch = { connected: false, channel: channels.join(', '), error: reason || 'Getrennt' };
     broadcastStatus();
   });
 
   twitchClient.on('connecting', () => {
-    console.log('[Twitch] Connecting to channels:', channels.join(', '));
+    console.log('[Twitch] Verbinde...');
   });
 
   twitchClient.on('reconnect', () => {
-    console.log('[Twitch] Reconnecting...');
+    console.log('[Twitch] Wiederverbindung...');
   });
 
   twitchClient.on('join', (channel, username, self) => {
     if (self) {
-      console.log('[Twitch] Joined channel:', channel);
+      console.log(`[Twitch] Kanal betreten: ${channel}`);
     }
   });
 
   twitchClient.connect().catch(err => {
-    console.error('[Twitch] Connection error:', err.message);
+    console.error('[Twitch] Verbindungsfehler:', err.message);
     connStatus.twitch = { connected: false, channel: channels.join(', '), error: err.message };
     broadcastStatus();
   });
@@ -424,194 +471,6 @@ function disconnectTwitch() {
   connStatus.twitch = { connected: false, channel: '', error: null };
   broadcastStatus();
 }
-
-// ---------------------------------------------------------------------------
-// Kick Chat Reader — Pusher WebSocket Integration
-// ---------------------------------------------------------------------------
-let kickWs = null;
-let kickPollInterval = null;
-let kickLastMessageId = null;
-
-function connectKick() {
-  const channel = config.kick.channel;
-  if (!channel || channel.trim() === '' || channel === 'dein_kick_kanal') {
-    connStatus.kick = { connected: false, channel: '', error: 'Kein gueltiger Kanal konfiguriert', mode: 'simulator' };
-    broadcastStatus();
-    return;
-  }
-
-  disconnectKick();
-
-  console.log('[Kick] Connecting to channel:', channel);
-
-  // Step 1: Get chatroom ID from Kick API
-  const apiUrl = `https://kick.com/api/v2/channels/${channel}`;
-
-  https.get(apiUrl, (res) => {
-    let data = '';
-    res.on('data', chunk => data += chunk);
-    res.on('end', () => {
-      try {
-        const json = JSON.parse(data);
-        const chatroomId = json.data?.chatroom_id || json.data?.chatroom?.id;
-
-        if (!chatroomId) {
-          console.error('[Kick] Could not find chatroom ID for channel:', channel);
-          connStatus.kick = { connected: false, channel, error: 'Chatroom-ID nicht gefunden', mode: 'simulator' };
-          broadcastStatus();
-          // Fallback to polling
-          startKickPolling(channel);
-          return;
-        }
-
-        console.log('[Kick] Found chatroom ID:', chatroomId, '- Starting Pusher connection');
-        connectKickPusher(chatroomId, channel);
-
-      } catch (e) {
-        console.error('[Kick] API parse error:', e.message);
-        connStatus.kick = { connected: false, channel, error: 'API-Fehler: ' + e.message, mode: 'simulator' };
-        broadcastStatus();
-        startKickPolling(channel);
-      }
-    });
-  }).on('error', (e) => {
-    console.error('[Kick] API request error:', e.message);
-    connStatus.kick = { connected: false, channel, error: 'Verbindungsfehler: ' + e.message, mode: 'simulator' };
-    broadcastStatus();
-    startKickPolling(channel);
-  });
-}
-
-function connectKickPusher(chatroomId, channel) {
-  try {
-    // Use Pusher WebSocket protocol
-    const WebSocket = require('ws');
-    const PUSHER_KEY = '32cbd69e03eb5b3ee65a';
-    const PUSHER_URL = `wss://ws-us2.pusher.com/app/${PUSHER_KEY}?protocol=7&client=js&version=7.6.0&flash=false`;
-
-    kickWs = new WebSocket(PUSHER_URL);
-
-    kickWs.on('open', () => {
-      console.log('[Kick] Pusher WebSocket connected');
-      // Subscribe to chatroom channel
-      const subscribeMsg = JSON.stringify({
-        event: 'pusher:subscribe',
-        data: { channel: `chatrooms.${chatroomId}.v2` }
-      });
-      kickWs.send(subscribeMsg);
-
-      connStatus.kick = { connected: true, channel, error: null, mode: 'pusher' };
-      broadcastStatus();
-    });
-
-    kickWs.on('message', (rawData) => {
-      try {
-        const msg = JSON.parse(rawData);
-        if (msg.event === 'App\\Events\\ChatMessageEvent' || msg.event === 'App\\Events\\MessageEvent') {
-          const chatData = JSON.parse(msg.data);
-          const chatMsg = chatData.content || chatData.message || '';
-          const username = chatData.sender?.username || chatData.username || 'Unknown';
-
-          if (chatMsg.startsWith('!')) {
-            handleChatCommand(username, chatMsg, 'kick');
-          }
-        }
-      } catch (e) {
-        // Ignore parse errors for non-chat messages
-      }
-    });
-
-    kickWs.on('error', (e) => {
-      console.error('[Kick] WebSocket error:', e.message);
-      connStatus.kick = { connected: false, channel, error: 'WebSocket-Fehler', mode: 'simulator' };
-      broadcastStatus();
-    });
-
-    kickWs.on('close', () => {
-      console.log('[Kick] WebSocket closed');
-      connStatus.kick = { connected: false, channel, error: 'Verbindung geschlossen', mode: 'simulator' };
-      broadcastStatus();
-
-      // Auto-reconnect after 5 seconds
-      if (config.kick.enabled) {
-        setTimeout(() => {
-          if (config.kick.enabled) connectKick();
-        }, 5000);
-      }
-    });
-
-  } catch (e) {
-    console.error('[Kick] Pusher init error (ws module missing?):', e.message);
-    console.log('[Kick] Falling back to polling mode');
-    startKickPolling(channel);
-  }
-}
-
-// Fallback: Polling mode (less reliable but works without ws module)
-function startKickPolling(channel) {
-  if (kickPollInterval) clearInterval(kickPollInterval);
-
-  connStatus.kick = { connected: true, channel, error: null, mode: 'polling' };
-  broadcastStatus();
-
-  console.log('[Kick] Starting polling mode for channel:', channel);
-
-  kickPollInterval = setInterval(() => {
-    const apiUrl = `https://kick.com/api/v2/channels/${channel}/messages`;
-
-    https.get(apiUrl, (res) => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => {
-        try {
-          const json = JSON.parse(data);
-          const messages = json.data?.messages || json.data || [];
-
-          for (const msg of messages) {
-            const msgId = msg.id || msg.message_id;
-            if (msgId && msgId === kickLastMessageId) continue;
-
-            const content = msg.content || '';
-            const username = msg.sender?.username || msg.username || 'Unknown';
-
-            if (content.startsWith('!')) {
-              handleChatCommand(username, content, 'kick');
-            }
-
-            if (msgId) kickLastMessageId = msgId;
-          }
-        } catch (e) {
-          // Silently ignore parse errors during polling
-        }
-      });
-    }).on('error', () => {
-      // Silently ignore polling errors
-    });
-  }, 3000); // Poll every 3 seconds
-}
-
-function disconnectKick() {
-  if (kickWs) {
-    try { kickWs.close(); } catch {}
-    kickWs = null;
-  }
-  if (kickPollInterval) {
-    clearInterval(kickPollInterval);
-    kickPollInterval = null;
-  }
-  connStatus.kick = { connected: false, channel: '', error: null, mode: 'simulator' };
-  broadcastStatus();
-}
-
-// API endpoint for Kick chat simulation (always available)
-app.post('/api/kick-sim', (req, res) => {
-  const { username, message } = req.body;
-  if (!username || !message) {
-    return res.status(400).json({ error: 'username and message required' });
-  }
-  handleChatCommand(username, message, 'kick');
-  res.json({ success: true });
-});
 
 // ---------------------------------------------------------------------------
 // Admin API
@@ -649,7 +508,7 @@ app.post('/api/battle-royale', (req, res) => {
 
 app.post('/api/nuke', (_req, res) => {
   nukeAll();
-  res.json({ success: true, message: 'Nuke ausgeloest! Alle Avatare zerstoert!' });
+  res.json({ success: true, message: 'Nuke ausgeloest!' });
 });
 
 app.post('/api/remove-avatar', (req, res) => {
@@ -661,13 +520,12 @@ app.post('/api/clear-all', (_req, res) => {
   avatars.clear();
   battleRoyaleActive = false;
   battleRoyaleZone = null;
-  broadcastState();
+  io.emit('clearAll');
   res.json({ success: true });
 });
 
 app.post('/api/config', (req, res) => {
   const newConfig = req.body;
-  // Deep merge
   for (const key of Object.keys(newConfig)) {
     if (typeof newConfig[key] === 'object' && !Array.isArray(newConfig[key]) && config[key]) {
       config[key] = { ...config[key], ...newConfig[key] };
@@ -679,7 +537,7 @@ app.post('/api/config', (req, res) => {
   res.json({ success: true, config });
 });
 
-// Twitch connect/disconnect with channel config
+// Twitch connect/disconnect
 app.post('/api/twitch/connect', (req, res) => {
   const { channel } = req.body;
   if (channel) {
@@ -692,26 +550,9 @@ app.post('/api/twitch/connect', (req, res) => {
 });
 
 app.post('/api/twitch/disconnect', (_req, res) => {
-  disconnectTwitch();
-  res.json({ success: true });
-});
-
-// Kick connect/disconnect with channel config
-app.post('/api/kick/connect', (req, res) => {
-  const { channel } = req.body;
-  if (channel) {
-    config.kick.channel = channel;
-    config.kick.enabled = true;
-    saveConfig();
-  }
-  connectKick();
-  res.json({ success: true });
-});
-
-app.post('/api/kick/disconnect', (_req, res) => {
-  config.kick.enabled = false;
+  config.twitch.enabled = false;
   saveConfig();
-  disconnectKick();
+  disconnectTwitch();
   res.json({ success: true });
 });
 
@@ -729,8 +570,9 @@ app.get('/api/sprites', (_req, res) => {
 // Socket.io Events
 // ---------------------------------------------------------------------------
 io.on('connection', (socket) => {
-  console.log(`[Socket] Client connected: ${socket.id}`);
+  console.log(`[Socket] Client verbunden: ${socket.id}`);
 
+  // Sende init-Daten
   socket.emit('init', {
     avatars: Array.from(avatars.values()),
     battleRoyaleActive,
@@ -741,30 +583,16 @@ io.on('connection', (socket) => {
 
   socket.emit('connStatus', connStatus);
 
+  // Admin kann Befehle senden
   socket.on('chatCommand', (data) => {
+    console.log(`[Admin] ${data.username}: ${data.command}`);
     handleChatCommand(data.username, data.command, data.platform || 'admin');
   });
 
-  socket.on('disconnect', () => {});
-});
-
-// ---------------------------------------------------------------------------
-// Broadcast State (throttled)
-// ---------------------------------------------------------------------------
-let lastBroadcast = 0;
-const BROADCAST_INTERVAL = 16;
-
-function broadcastState() {
-  const now = Date.now();
-  if (now - lastBroadcast < BROADCAST_INTERVAL) return;
-  lastBroadcast = now;
-
-  io.emit('stateUpdate', {
-    avatars: Array.from(avatars.values()),
-    battleRoyaleActive,
-    battleRoyaleZone
+  socket.on('disconnect', () => {
+    console.log(`[Socket] Client getrennt: ${socket.id}`);
   });
-}
+});
 
 // ---------------------------------------------------------------------------
 // Start Server
@@ -773,34 +601,32 @@ const PORT = process.env.PORT || 3000;
 
 server.listen(PORT, () => {
   console.log('');
-  console.log('  ╔══════════════════════════════════════════════════╗');
-  console.log('  ║       Avatar Stream System v0.0.2               ║');
-  console.log('  ╠══════════════════════════════════════════════════╣');
-  console.log(`  ║  Overlay:  http://localhost:${PORT}/overlay          ║`);
-  console.log(`  ║  Admin:    http://localhost:${PORT}/admin            ║`);
-  console.log('  ╠══════════════════════════════════════════════════╣');
-  console.log('  ║  Chat-Befehle:                                   ║');
-  console.log('  ║    !join  !jump  !dance  !attack                 ║');
-  console.log('  ║    !color <farbe>  !leave  !heal                 ║');
-  console.log('  ║    !speed <1-5>  !grow  !shrink                  ║');
-  console.log('  ║    !wave  !sit  !flip  !emote <text>  !reset     ║');
-  console.log('  ╚══════════════════════════════════════════════════╝');
+  console.log('  +======================================================+');
+  console.log('  |       Avatar Stream System v0.0.3 (Twitch Only)      |');
+  console.log('  +======================================================+');
+  console.log(`  |  Overlay:  http://localhost:${PORT}/overlay              |`);
+  console.log(`  |  Admin:    http://localhost:${PORT}/admin                |`);
+  console.log('  +------------------------------------------------------+');
+  console.log('  |  Chat-Befehle:                                       |');
+  console.log('  |    !join  !jump  !dance  !attack  !color <farbe>     |');
+  console.log('  |    !leave  !heal  !speed <1-5>  !grow  !shrink       |');
+  console.log('  |    !wave  !sit  !flip  !emote <text>  !reset         |');
+  console.log('  +======================================================+');
   console.log('');
 
-  // Auto-connect if channels are configured
+  // Auto-connect falls Kanäle konfiguriert
   if (config.twitch.enabled && config.twitch.channels.length > 0) {
-    const validChannels = config.twitch.channels.filter(c => c && c !== 'dein_twitch_kanal');
-    if (validChannels.length > 0) connectTwitch();
-  }
-  if (config.kick.enabled && config.kick.channel && config.kick.channel !== 'dein_kick_kanal') {
-    connectKick();
+    const validChannels = config.twitch.channels.filter(c => c && c !== 'dein_twitch_kanal' && c.trim() !== '');
+    if (validChannels.length > 0) {
+      console.log('[Start] Verbinde Twitch automatisch...');
+      connectTwitch();
+    }
   }
 });
 
 process.on('SIGINT', () => {
-  console.log('\n[Server] Shutting down...');
+  console.log('\n[Server] Fahre herunter...');
   disconnectTwitch();
-  disconnectKick();
   server.close();
   process.exit(0);
 });

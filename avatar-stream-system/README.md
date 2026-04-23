@@ -1,19 +1,19 @@
 # Avatar Stream System
 
-**Lokales OBS-Overlay mit Twitch/Kick-Chat-Integration, Sprite-Animationen und Battle Royale Modus.**
+**Lokales OBS-Overlay mit Twitch-Chat-Integration, Sprite-Animationen und Battle Royale Modus.**
 
 ---
 
 ## Schnellstart
 
 ```bash
-# 1. Abhängigkeiten installieren
-npm install
+# Windows: Doppelklick auf install.bat, dann start.bat
 
-# 2. Server starten
+# Oder manuell:
+npm install
 npm start
 
-# 3. Browser öffnen
+# Browser oeffnen:
 # Overlay:  http://localhost:3000/overlay
 # Admin:    http://localhost:3000/admin
 ```
@@ -22,22 +22,24 @@ npm start
 
 ## OBS-Einrichtung
 
-1. OBS öffnen → **Quellen** → **Hinzufügen** → **Browser**
+1. OBS oeffnen → **Quellen** → **Hinzufuegen** → **Browser**
 2. URL: `http://localhost:3000/overlay`
-3. Breite: `1920` / Höhe: `1080`
+3. Breite: `1920` / Hoehe: `1080`
 4. **Wichtig:** Haken bei "Browser neu starten, wenn die Szene aktiv wird" setzen
-5. Hintergrund ist transparent – Avatare schweben über deinem Stream!
+5. Hintergrund ist transparent – Avatare schweben ueber deinem Stream!
+
+**Tipp:** Debug-Modus mit `http://localhost:3000/overlay?debug=1` zeigt Zustandsinfo oben links.
 
 ---
 
 ## Twitch-Integration
 
-1. Öffne `config.json`
-2. Trage deinen Twitch-Kanal ein: `"channels": ["dein_kanal_name"]`
-3. Setze `"enabled": true`
-4. Server neu starten
+1. Admin-Panel oeffnen: `http://localhost:3000/admin`
+2. Twitch-Kanalnamen eintragen (ohne #)
+3. Auf "Verbinden" klicken
+4. Fertig! Chat-Befehle werden automatisch erkannt.
 
-**Hinweis:** tmi.js verbindet sich als anonymer Leser – kein OAuth-Token nötig!
+**Hinweis:** tmi.js verbindet sich als anonymer Leser – kein OAuth-Token noetig!
 
 ---
 
@@ -47,19 +49,31 @@ npm start
 |--------|---------|
 | `!join` | Erstellt einen Avatar auf dem Overlay |
 | `!jump` | Avatar springt |
+| `!dance` | Avatar tanzt (3 Sekunden) |
 | `!attack` | Avatar greift an (nur im Battle Royale) |
-| `!dance` | Avatar tanzt |
+| `!color <farbe>` | Avatar-Farbe aendern (z.B. !color red, !color #FF6B6B) |
+| `!heal` | +20 HP heilen |
+| `!speed <1-5>` | Tempo einstellen |
+| `!grow` | Avatar wachsen |
+| `!shrink` | Avatar schrumpfen |
+| `!wave` | Avatar winkt |
+| `!sit` | Avatar setzt sich (3 Sekunden) |
+| `!flip` | Avatar dreht sich um |
+| `!emote <text>` | Sprachblase anzeigen |
+| `!leave` | Avatar verlassen |
+| `!reset` | Avatar zuruecksetzen |
 
 ---
 
 ## Admin-Interface (`localhost:3000/admin`)
 
+- **Twitch-Verbindung:** Kanal eintragen, verbinden/trennen
 - **Test-Avatar spawnen:** Sofort einen Avatar zum Testen erstellen
 - **5 Avatare spawnen:** Mehrere Avatare auf einmal
-- **Battle Royale:** Alle Avatare kämpfen gegeneinander (KI-gesteuert)
-- **Nuke:** Alle Avatare sofort zerstören (mit Explosionseffekt)
-- **Kick-Simulator:** Kick-Chat-Nachrichten simulieren
-- **Einstellungen:** Avatar-Größe, Schaden, Twitch-Kanal live anpassen
+- **Battle Royale:** Alle Avatare kaempfen gegeneinander (KI-gesteuert)
+- **Nuke:** Alle Avatare sofort zerstoeren (mit Explosionseffekt)
+- **Chat-Simulator:** Befehle manuell testen
+- **Einstellungen:** Avatar-Groesse, Schaden live anpassen
 
 ---
 
@@ -79,7 +93,7 @@ public/sprites/
 
 ### Sprite-Format: 4x4 Grid
 
-Ein Sprite-Sheet besteht aus einem **4×4-Raster** (4 Spalten, 4 Zeilen):
+Ein Sprite-Sheet besteht aus einem 4x4-Raster (4 Spalten, 4 Zeilen):
 
 ```
 ┌─────┬─────┬─────┬─────┐
@@ -93,46 +107,25 @@ Ein Sprite-Sheet besteht aus einem **4×4-Raster** (4 Spalten, 4 Zeilen):
 └─────┴─────┴─────┴─────┘
 ```
 
-**Beispiel:** Bei 64px pro Frame → Gesamtbild = **256×256 px**
+**Beispiel:** Bei 64px pro Frame → Gesamtbild = 256x256 px
 
-### JSON-Datei pro Sprite
-
-```json
-{
-  "name": "default",
-  "columns": 4,
-  "rows": 4,
-  "frameWidth": 64,
-  "frameHeight": 64,
-  "animations": {
-    "idle":      { "row": 0, "frames": [0, 1, 2, 3], "speed": 150 },
-    "walking":   { "row": 1, "frames": [0, 1, 2, 3], "speed": 120 },
-    "jumping":   { "row": 2, "frames": [0, 1, 2, 3], "speed": 100 },
-    "attacking": { "row": 3, "frames": [0, 1, 2, 3], "speed": 80  },
-    "dancing":   { "row": 0, "frames": [0, 1, 2, 3], "speed": 100 },
-    "dead":      { "row": 3, "frames": [3], "speed": 0 }
-  }
-}
-```
-
-### Eigene Sprites hinzufügen
+### Eigene Sprites hinzufuegen
 
 1. Sprite-Sheet als `.png` in `public/sprites/avatars/` ablegen
 2. Entsprechende `.json`-Datei mit Metadaten erstellen
-3. Server startet automatisch neu (oder manuell `npm start`)
-4. Sprites werden vom Overlay automatisch erkannt
+3. Sprites werden vom Overlay automatisch erkannt
 
 ---
 
 ## Battle Royale Modus
 
 1. Mindestens 2 Avatare auf dem Bildschirm
-2. Im Admin-Interface auf **"Battle Royale"** klicken
+2. Im Admin-Interface auf "Battle Royale" klicken
 3. Jeder Avatar bekommt 100 HP
-4. KI steuert die Avatare – sie jagen den nächsten Gegner
+4. KI steuert die Avatare – sie jagen den naechsten Gegner
 5. Die rote Zone schrumpft langsam zusammen
-6. Letzter Überlebender gewinnt!
-7. Chat-Kommando `!attack` lässt Zuschauer aktiv angreifen
+6. Letzter Ueberlebender gewinnt!
+7. Chat-Kommando `!attack` laesst Zuschauer aktiv angreifen
 
 ---
 
@@ -140,10 +133,10 @@ Ein Sprite-Sheet besteht aus einem **4×4-Raster** (4 Spalten, 4 Zeilen):
 
 - **requestAnimationFrame** statt setInterval → Sync mit Monitor-Refresh
 - **DPR = 1** im Canvas → Kein HiDPI-Overhead in OBS
-- **Delta-Time Capping** → Keine Sprünge bei Tab-Switch
-- **State-Interpolation** → Smooth movement zwischen Server-Updates
-- **Alpha-Transparenz** → Canvas-Hintergrund transparent für OBS
-- **Throttled Broadcasts** → Max 60 State-Updates/Sekunde
+- **Delta-Time Capping** → Keine Spruenge bei Tab-Switch
+- **Alpha-Transparenz** → Canvas-Hintergrund transparent fuer OBS
+- **Event-basierte Kommunikation** → Kein Polling, nur bei Aenderungen
+- **Lokale Physik** → Overlay berechnet Bewegung selbst, kein Server-Flaschenhals
 
 ---
 
@@ -158,12 +151,7 @@ Ein Sprite-Sheet besteht aus einem **4×4-Raster** (4 Spalten, 4 Zeilen):
 ┌──────────────┐     HTTP API       │  │   tmi.js    │ │
 │  Admin-Panel  │ ◄───────────────► │  │  (Twitch)   │ │
 │  (localhost)  │                    │  └─────────────┘ │
-└──────────────┘                    │                  │
-                                    │  ┌─────────────┐ │
-                                    │  │ Kick-Sim    │ │
-                                    │  │  (API)      │ │
-                                    │  └─────────────┘ │
-                                    └─────────────────┘
+└──────────────┘                    └─────────────────┘
 ```
 
 ---
@@ -172,10 +160,10 @@ Ein Sprite-Sheet besteht aus einem **4×4-Raster** (4 Spalten, 4 Zeilen):
 
 | Einstellung | Standard | Beschreibung |
 |-------------|----------|--------------|
-| `twitch.enabled` | `true` | Twitch-Chat aktivieren |
-| `twitch.channels` | `[]` | Twitch-Kanäle (ohne #) |
-| `avatar.size` | `64` | Avatar-Größe in Pixeln |
-| `avatar.jumpHeight` | `120` | Sprunghöhe in Pixeln |
+| `twitch.enabled` | `false` | Twitch-Chat automatisch verbinden |
+| `twitch.channels` | `[]` | Twitch-Kanaele (ohne #) |
+| `avatar.size` | `64` | Avatar-Groesse in Pixeln |
+| `avatar.jumpHeight` | `120` | Sprunghoehe in Pixeln |
 | `avatar.defaultSpeed` | `2` | Bewegungsgeschwindigkeit |
 | `battleRoyale.damagePerHit` | `10` | Schaden pro Treffer |
 | `battleRoyale.attackRange` | `60` | Angriffsreichweite |
@@ -189,6 +177,5 @@ Ein Sprite-Sheet besteht aus einem **4×4-Raster** (4 Spalten, 4 Zeilen):
 |--------|-----|
 | Overlay | `http://localhost:3000/overlay` |
 | Admin | `http://localhost:3000/admin` |
-| API State | `http://localhost:3000/api/state` |
-| Kick Sim | `POST http://localhost:3000/api/kick-sim` |
+| API State | `GET http://localhost:3000/api/state` |
 | Spawn Test | `POST http://localhost:3000/api/spawn-test` |

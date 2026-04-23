@@ -3,10 +3,6 @@
     "enabled": false,
     "channels": [""]
   },
-  "kick": {
-    "enabled": false,
-    "channel": ""
-  },
   "overlay": {
     "width": 1920,
     "height": 1080,
@@ -29,11 +25,5 @@
     "attackCooldown": 800,
     "shrinkSpeed": 0.5,
     "shrinkInterval": 5000
-  },
-  "commands": {
-    "join": "!join",
-    "jump": "!jump",
-    "attack": "!attack",
-    "dance": "!dance"
   }
 }

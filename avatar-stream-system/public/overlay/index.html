@@ -8,15 +8,44 @@
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100%; overflow: hidden; background: transparent; }
     canvas { display: block; width: 100%; height: 100%; background: transparent; }
+    #debug {
+      position: fixed; top: 8px; left: 8px;
+      font: 11px 'Consolas', 'Courier New', monospace;
+      color: #0f0; background: rgba(0,0,0,0.7);
+      padding: 6px 10px; border-radius: 4px;
+      pointer-events: none; z-index: 9999;
+      display: none;
+    }
   </style>
 </head>
 <body>
 <canvas id="overlay"></canvas>
+<div id="debug"></div>
 <script src="/socket.io/socket.io.js"></script>
 <script>
 (function() {
   'use strict';
 
+  // ---------------------------------------------------------------------------
+  // Debug Mode (URL-Parameter ?debug=1)
+  // ---------------------------------------------------------------------------
+  const urlParams = new URLSearchParams(window.location.search);
+  const DEBUG = urlParams.get('debug') === '1';
+  const debugEl = document.getElementById('debug');
+  if (DEBUG) debugEl.style.display = 'block';
+
+  function log(msg) {
+    console.log('[Overlay] ' + msg);
+    if (DEBUG) {
+      debugEl.textContent = msg;
+      clearTimeout(debugEl._timer);
+      debugEl._timer = setTimeout(() => { debugEl.textContent = ''; }, 3000);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Canvas Setup
+  // ---------------------------------------------------------------------------
   const canvas = document.getElementById('overlay');
   const ctx = canvas.getContext('2d', { alpha: true });
   let W = 1920, H = 1080;
@@ -26,10 +55,14 @@
     H = window.innerHeight;
     canvas.width = W;
     canvas.height = H;
+    log('Canvas: ' + W + 'x' + H);
   }
   resizeCanvas();
   window.addEventListener('resize', resizeCanvas);
 
+  // ---------------------------------------------------------------------------
+  // Config (vom Server empfangen, lokale Defaults)
+  // ---------------------------------------------------------------------------
   let config = {
     avatar: { defaultSpeed: 2, jumpHeight: 120, jumpDuration: 500, size: 64, spriteColumns: 4, spriteRows: 4, animationSpeed: 150 },
     battleRoyale: { damagePerHit: 10, attackRange: 60, attackCooldown: 800, shrinkSpeed: 0.5, shrinkInterval: 5000 },
@@ -52,7 +85,9 @@
         frameWidth: img.width / (cols || config.avatar.spriteColumns),
         frameHeight: img.height / (rows || config.avatar.spriteRows)
       });
+      log('Sprite geladen: ' + name);
     };
+    img.onerror = () => { log('Sprite Fehler: ' + name); };
     img.src = src;
   }
 
@@ -82,15 +117,13 @@
   }
 
   // ---------------------------------------------------------------------------
-  // State
+  // Avatar State (lokal im Overlay)
   // ---------------------------------------------------------------------------
   const avatars = new Map();
   let battleRoyaleActive = false;
   let battleRoyaleZone = null;
 
-  // ---------------------------------------------------------------------------
-  // Effects
-  // ---------------------------------------------------------------------------
+  // Effekte
   const effects = [];
 
   function addExplosion(x, y, color, count) {
@@ -112,17 +145,63 @@
   }
 
   function addNukeEffect(explosions) {
-    effects.push({ type: 'nuke', explosions, startTime: Date.now(), duration: 1500 });
+    // explosions ist Array von {id, color} - wir brauchen x,y
+    const explData = [];
+    for (const ex of explosions) {
+      const avatar = avatars.get(ex.id);
+      if (avatar) {
+        explData.push({ x: avatar.x + avatar.width / 2, y: avatar.y + avatar.height / 2, color: ex.color });
+      }
+    }
+    effects.push({ type: 'nuke', explosions: explData, startTime: Date.now(), duration: 1500 });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Avatar erstellen (lokal, mit Canvas-Positionen)
+  // ---------------------------------------------------------------------------
+  function createLocalAvatar(serverData) {
+    const groundY = getGroundY();
+    const avatar = {
+      id: serverData.id,
+      username: serverData.username,
+      platform: serverData.platform,
+      color: serverData.color,
+      hp: serverData.hp || 100,
+      maxHp: serverData.maxHp || 100,
+      state: serverData.state || 'idle',
+      speed: serverData.speed || config.avatar.defaultSpeed,
+      width: serverData.width || config.avatar.size,
+      height: serverData.height || config.avatar.size,
+      direction: serverData.direction || (Math.random() > 0.5 ? 1 : -1),
+
+      // Position: xRatio (0-1) → Canvas-Breite, y am Boden
+      x: (serverData.xRatio || (0.1 + Math.random() * 0.8)) * W,
+      y: groundY - (serverData.height || config.avatar.size),
+      vx: (Math.random() - 0.5) * (serverData.speed || config.avatar.defaultSpeed) * 2,
+      vy: 0,
+
+      isJumping: false,
+      jumpStartTime: 0,
+      animFrame: 0,
+      animTimer: 0,
+      attackCooldown: 0,
+      targetId: null,
+      emote: serverData.emote || null,
+      emoteTimer: serverData.emoteTimer || 0,
+      spriteName: serverData.spriteName || null,
+      spawnTime: serverData.spawnTime || Date.now()
+    };
+    return avatar;
   }
 
   // ---------------------------------------------------------------------------
   // Physics & AI
   // ---------------------------------------------------------------------------
-  const GROUND_Y_RATIO = 0.9;
+  const GROUND_Y_RATIO = 0.88;
 
   function getGroundY() {
     return battleRoyaleZone
-      ? battleRoyaleZone.y + battleRoyaleZone.height * GROUND_Y_RATIO
+      ? (battleRoyaleZone.yRatio + battleRoyaleZone.heightRatio * GROUND_Y_RATIO) * H
       : H * GROUND_Y_RATIO;
   }
 
@@ -164,46 +243,53 @@
         }
       }
 
-      // Movement
+      // Movement AI
       if (battleRoyaleActive && avatar.state !== 'dancing' && avatar.state !== 'sitting' && avatar.state !== 'waving') {
         updateBattleAI(avatar, groundY, now);
-      } else if (avatar.state !== 'sitting' && avatar.state !== 'waving') {
+      } else if (avatar.state !== 'sitting' && avatar.state !== 'waving' && avatar.state !== 'dancing') {
         // Idle wandering
         if (!avatar.isJumping && Math.random() < 0.005) {
-          avatar.vx = (Math.random() - 0.5) * (avatar.speed || config.avatar.defaultSpeed) * 2;
+          avatar.vx = (Math.random() - 0.5) * avatar.speed * 2;
         }
-        if (avatar.state !== 'dancing') {
-          avatar.state = Math.abs(avatar.vx) > 0.3 ? 'walking' : 'idle';
-        }
+        avatar.state = Math.abs(avatar.vx) > 0.3 ? 'walking' : 'idle';
       }
 
-      avatar.x += avatar.vx;
+      // Bewegung anwenden
+      if (avatar.state !== 'sitting') {
+        avatar.x += avatar.vx;
+      }
 
-      // Direction
+      // Reibung
+      if (!avatar.isJumping && avatar.state !== 'walking' && Math.abs(avatar.vx) > 0.1) {
+        avatar.vx *= 0.98;
+      }
+
+      // Richtung
       if (avatar.vx > 0.1) avatar.direction = 1;
       else if (avatar.vx < -0.1) avatar.direction = -1;
 
-      // Screen edge collision
-      const minX = battleRoyaleZone ? battleRoyaleZone.x : 0;
-      const maxX = battleRoyaleZone
-        ? battleRoyaleZone.x + battleRoyaleZone.width - avatar.width
-        : W - avatar.width;
+      // Bildschirmrand-Kollision
+      const minX = 0;
+      const maxX = W - avatar.width;
 
       if (avatar.x < minX) { avatar.x = minX; avatar.vx = Math.abs(avatar.vx) * 0.8; }
       if (avatar.x > maxX) { avatar.x = maxX; avatar.vx = -Math.abs(avatar.vx) * 0.8; }
 
+      // Am Boden halten
       if (!avatar.isJumping && avatar.y > groundY - avatar.height) {
         avatar.y = groundY - avatar.height;
       }
 
-      // Zone damage
+      // Zone-Schaden (Battle Royale)
       if (battleRoyaleActive && battleRoyaleZone) {
-        if (avatar.x < battleRoyaleZone.x || avatar.x + avatar.width > battleRoyaleZone.x + battleRoyaleZone.width) {
+        const zLeft = battleRoyaleZone.xRatio * W;
+        const zRight = (battleRoyaleZone.xRatio + battleRoyaleZone.widthRatio) * W;
+        if (avatar.x < zLeft || avatar.x + avatar.width > zRight) {
           avatar.hp -= 0.05;
         }
       }
 
-      // Death
+      // Tod
       if (avatar.hp <= 0) {
         avatar.hp = 0;
         avatar.state = 'dead';
@@ -214,7 +300,6 @@
           if (alive.length <= 1) {
             battleRoyaleActive = false;
             if (alive.length === 1) {
-              // Winner announcement effect
               addExplosion(alive[0].x + alive[0].width / 2, alive[0].y, '#FFD700', 30);
             }
           }
@@ -240,7 +325,7 @@
 
     const dx = target.x - avatar.x;
     const dist = Math.abs(dx);
-    const speed = (avatar.speed || config.avatar.defaultSpeed) * 1.5;
+    const speed = avatar.speed * 1.5;
 
     if (dist > config.battleRoyale.attackRange) {
       avatar.vx = Math.sign(dx) * speed;
@@ -287,13 +372,10 @@
     if (!battleRoyaleActive || !battleRoyaleZone) return;
     if (now - lastShrinkTime < config.battleRoyale.shrinkInterval) return;
     lastShrinkTime = now;
-    const shrink = config.battleRoyale.shrinkSpeed * 50;
-    battleRoyaleZone.x += shrink;
-    battleRoyaleZone.y += shrink * 0.5;
-    battleRoyaleZone.width -= shrink * 2;
-    battleRoyaleZone.height -= shrink;
-    if (battleRoyaleZone.width < 200) battleRoyaleZone.width = 200;
-    if (battleRoyaleZone.height < 200) battleRoyaleZone.height = 200;
+    const shrink = 0.01; // 1% pro Intervall
+    battleRoyaleZone.xRatio += shrink * 0.5;
+    battleRoyaleZone.widthRatio -= shrink;
+    if (battleRoyaleZone.widthRatio < 0.15) battleRoyaleZone.widthRatio = 0.15;
   }
 
   // ---------------------------------------------------------------------------
@@ -302,6 +384,15 @@
   function render() {
     ctx.clearRect(0, 0, W, H);
 
+    // Boden-Linie (subtil)
+    const groundY = getGroundY();
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, groundY);
+    ctx.lineTo(W, groundY);
+    ctx.stroke();
+
     if (battleRoyaleActive && battleRoyaleZone) drawBattleZone();
 
     const sorted = Array.from(avatars.values()).sort((a, b) => a.y - b.y);
@@ -309,19 +400,32 @@
 
     drawEffects();
     if (battleRoyaleActive) drawBattleHUD();
+
+    // Debug-Info
+    if (DEBUG) {
+      ctx.font = '12px monospace';
+      ctx.fillStyle = 'rgba(0,255,0,0.7)';
+      ctx.fillText(`Avatars: ${avatars.size} | BR: ${battleRoyaleActive} | Canvas: ${W}x${H}`, 10, 20);
+    }
   }
 
   function drawBattleZone() {
     const z = battleRoyaleZone;
+    const zx = z.xRatio * W;
+    const zy = z.yRatio * H;
+    const zw = z.widthRatio * W;
+    const zh = z.heightRatio * H;
+
     ctx.fillStyle = 'rgba(255, 0, 0, 0.08)';
-    ctx.fillRect(0, 0, W, z.y);
-    ctx.fillRect(0, z.y + z.height, W, H - z.y - z.height);
-    ctx.fillRect(0, z.y, z.x, z.height);
-    ctx.fillRect(z.x + z.width, z.y, W - z.x - z.width, z.height);
+    ctx.fillRect(0, 0, W, zy);
+    ctx.fillRect(0, zy + zh, W, H - zy - zh);
+    ctx.fillRect(0, zy, zx, zh);
+    ctx.fillRect(zx + zw, zy, W - zx - zw, zh);
+
     ctx.strokeStyle = 'rgba(255, 50, 50, 0.6)';
     ctx.lineWidth = 3;
     ctx.setLineDash([10, 5]);
-    ctx.strokeRect(z.x, z.y, z.width, z.height);
+    ctx.strokeRect(zx, zy, zw, zh);
     ctx.setLineDash([]);
   }
 
@@ -341,12 +445,10 @@
 
     ctx.restore();
 
-    // Emote bubble
-    if (avatar.emote) {
-      drawEmoteBubble(avatar);
-    }
+    // Emote-Blase (ausserhalb des save/restore, da absolute Position)
+    if (avatar.emote) drawEmoteBubble(avatar);
 
-    // HP Bar
+    // HP-Leiste
     if (battleRoyaleActive && avatar.state !== 'dead') drawHPBar(avatar);
 
     drawUsername(avatar);
@@ -361,7 +463,7 @@
 
     if (isDead) ctx.globalAlpha = 0.4;
 
-    // Body
+    // Körper
     ctx.fillStyle = avatar.color;
     if (isSitting) {
       ctx.beginPath();
@@ -373,39 +475,37 @@
       ctx.fill();
     }
 
-    // Head
+    // Kopf
     ctx.fillStyle = avatar.color;
     const headY = isSitting ? h * 0.35 : h * 0.25;
     ctx.beginPath();
     ctx.arc(w / 2, headY, w * 0.28, 0, Math.PI * 2);
     ctx.fill();
 
-    // Eyes
+    // Augen
     ctx.fillStyle = '#fff';
     ctx.beginPath();
     ctx.arc(w * 0.38, headY - w * 0.03, w * 0.08, 0, Math.PI * 2);
     ctx.arc(w * 0.62, headY - w * 0.03, w * 0.08, 0, Math.PI * 2);
     ctx.fill();
 
-    // Pupils
+    // Pupillen
     ctx.fillStyle = '#222';
     ctx.beginPath();
     ctx.arc(w * 0.40, headY - w * 0.03, w * 0.04, 0, Math.PI * 2);
     ctx.arc(w * 0.64, headY - w * 0.03, w * 0.04, 0, Math.PI * 2);
     ctx.fill();
 
-    // Dead X eyes
+    // Tote X-Augen
     if (isDead) {
       ctx.strokeStyle = '#ff0000';
       ctx.lineWidth = 2;
-      // Left X
       ctx.beginPath();
       ctx.moveTo(w * 0.32, headY - w * 0.08);
       ctx.lineTo(w * 0.44, headY + w * 0.02);
       ctx.moveTo(w * 0.44, headY - w * 0.08);
       ctx.lineTo(w * 0.32, headY + w * 0.02);
       ctx.stroke();
-      // Right X
       ctx.beginPath();
       ctx.moveTo(w * 0.56, headY - w * 0.08);
       ctx.lineTo(w * 0.68, headY + w * 0.02);
@@ -414,16 +514,15 @@
       ctx.stroke();
     }
 
-    // Attack arm
+    // Angriffs-Arm
     if (isAttacking) {
       ctx.fillStyle = avatar.color;
       ctx.fillRect(w * 0.85, h * 0.35, w * 0.35, h * 0.1);
-      // Sword/weapon line
       ctx.fillStyle = '#ccc';
       ctx.fillRect(w * 1.1, h * 0.32, w * 0.15, h * 0.04);
     }
 
-    // Dance arms
+    // Tanz-Arme
     if (isDancing) {
       const danceOffset = Math.sin(Date.now() * 0.01) * 5;
       ctx.fillStyle = avatar.color;
@@ -431,7 +530,7 @@
       ctx.fillRect(w * 0.85, h * 0.4 - danceOffset, w * 0.25, h * 0.08);
     }
 
-    // Wave arm
+    // Wink-Arm
     if (isWaving) {
       const waveOffset = Math.sin(Date.now() * 0.015) * 8;
       ctx.fillStyle = avatar.color;
@@ -442,9 +541,8 @@
       ctx.restore();
     }
 
-    // Platform badge
-    const badgeColor = avatar.platform === 'twitch' ? '#9146FF' : avatar.platform === 'kick' ? '#53FC18' : '#888';
-    ctx.fillStyle = badgeColor;
+    // Plattform-Badge (Twitch-Lila)
+    ctx.fillStyle = avatar.platform === 'twitch' ? '#9146FF' : '#888';
     ctx.beginPath();
     ctx.arc(w * 0.82, h * 0.08, 5, 0, Math.PI * 2);
     ctx.fill();
@@ -463,20 +561,17 @@
     const bw = metrics.width + 16;
     const bh = 22;
 
-    // Bubble background
     ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
     ctx.beginPath();
     ctx.roundRect(cx - bw / 2, cy - bh, bw, bh, 6);
     ctx.fill();
 
-    // Bubble pointer
     ctx.beginPath();
     ctx.moveTo(cx - 5, cy);
     ctx.lineTo(cx, cy + 5);
     ctx.lineTo(cx + 5, cy);
     ctx.fill();
 
-    // Text
     ctx.fillStyle = '#fff';
     ctx.textAlign = 'center';
     ctx.fillText(text, cx, cy - 6);
@@ -601,90 +696,166 @@
   requestAnimationFrame(gameLoop);
 
   // ---------------------------------------------------------------------------
-  // Socket.io
+  // Socket.io — Event-basierte Kommunikation
   // ---------------------------------------------------------------------------
   const socket = io();
 
-  socket.on('connect', () => { console.log('[Overlay] Connected'); });
+  socket.on('connect', () => {
+    log('Verbunden mit Server');
+  });
 
+  socket.on('disconnect', () => {
+    log('Verbindung getrennt!');
+  });
+
+  // Init: Bestehende Avatare laden
   socket.on('init', (data) => {
     avatars.clear();
-    if (data.config) config = data.config;
-    if (data.avatars) for (const a of data.avatars) avatars.set(a.id, a);
-    battleRoyaleActive = data.battleRoyaleActive || false;
-    battleRoyaleZone = data.battleRoyaleZone || null;
-  });
-
-  socket.on('stateUpdate', (data) => {
-    if (data.avatars) {
-      const serverIds = new Set();
+    if (data.config) {
+      config = { ...config, ...data.config };
+    }
+    if (data.avatars && data.avatars.length > 0) {
       for (const a of data.avatars) {
-        serverIds.add(a.id);
-        const existing = avatars.get(a.id);
-        if (existing) {
-          existing.hp = a.hp;
-          existing.maxHp = a.maxHp;
-          existing.state = a.state;
-          existing.isJumping = a.isJumping;
-          existing.jumpStartTime = a.jumpStartTime;
-          existing.attackCooldown = a.attackCooldown;
-          existing.targetId = a.targetId;
-          existing.color = a.color;
-          existing.username = a.username;
-          existing.platform = a.platform;
-          existing.direction = a.direction;
-          existing.width = a.width;
-          existing.height = a.height;
-          existing.speed = a.speed;
-          existing.emote = a.emote;
-          existing.emoteTimer = a.emoteTimer;
-          existing.x += (a.x - existing.x) * 0.3;
-          existing.y += (a.y - existing.y) * 0.3;
-          existing.vx += (a.vx - existing.vx) * 0.2;
-        } else {
-          avatars.set(a.id, a);
-        }
+        const localAvatar = createLocalAvatar(a);
+        avatars.set(a.id, localAvatar);
       }
-      for (const [id] of avatars) {
-        if (!serverIds.has(id)) avatars.delete(id);
-      }
+      log(`${data.avatars.length} Avatare geladen`);
     }
     battleRoyaleActive = data.battleRoyaleActive || false;
     battleRoyaleZone = data.battleRoyaleZone || null;
   });
 
-  socket.on('avatarJoined', (data) => {
-    addJoinEffect(data.x || W / 2, data.y || H * GROUND_Y_RATIO, data.color);
+  // Neuer Avatar gespawnt
+  socket.on('avatarSpawn', (data) => {
+    if (avatars.has(data.id)) return; // Bereits vorhanden
+    const avatar = createLocalAvatar(data);
+    avatars.set(data.id, avatar);
+    addJoinEffect(avatar.x + avatar.width / 2, avatar.y + avatar.height / 2, avatar.color);
+    log(`${data.username} beigetreten`);
   });
 
-  socket.on('avatarLeft', (data) => {
-    const avatar = avatars.get(data.username.toLowerCase());
+  // Avatar-Aktion (jump, dance, etc.)
+  socket.on('avatarAction', (data) => {
+    const avatar = avatars.get(data.id);
+    if (!avatar) return;
+
+    switch (data.action) {
+      case 'jump':
+        if (!avatar.isJumping) {
+          avatar.isJumping = true;
+          avatar.jumpStartTime = Date.now();
+          avatar.state = 'jumping';
+        }
+        break;
+      case 'attack':
+        avatar.state = 'attacking';
+        avatar.attackCooldown = config.battleRoyale.attackCooldown;
+        setTimeout(() => { if (avatar.state === 'attacking') avatar.state = 'idle'; }, 300);
+        break;
+      case 'dance':
+        avatar.state = 'dancing';
+        setTimeout(() => { if (avatar.state === 'dancing') avatar.state = 'idle'; }, 3000);
+        break;
+      case 'color':
+        avatar.color = data.color;
+        break;
+      case 'heal':
+        avatar.hp = data.hp;
+        avatar.emote = '+20 HP';
+        avatar.emoteTimer = 1000;
+        break;
+      case 'speed':
+        avatar.speed = data.speed;
+        break;
+      case 'grow':
+        avatar.width = data.width;
+        avatar.height = data.height;
+        break;
+      case 'shrink':
+        avatar.width = data.width;
+        avatar.height = data.height;
+        break;
+      case 'wave':
+        avatar.state = 'waving';
+        avatar.emote = 'Wink!';
+        avatar.emoteTimer = 1500;
+        setTimeout(() => { if (avatar.state === 'waving') avatar.state = 'idle'; }, 1500);
+        break;
+      case 'sit':
+        avatar.state = 'sitting';
+        avatar.vx = 0;
+        setTimeout(() => { if (avatar.state === 'sitting') avatar.state = 'idle'; }, 3000);
+        break;
+      case 'flip':
+        avatar.direction = data.direction;
+        break;
+      case 'emote':
+        avatar.emote = data.emote;
+        avatar.emoteTimer = 2500;
+        break;
+      case 'reset':
+        avatar.hp = 100;
+        avatar.maxHp = 100;
+        avatar.width = config.avatar.size;
+        avatar.height = config.avatar.size;
+        avatar.speed = config.avatar.defaultSpeed;
+        avatar.state = 'idle';
+        avatar.isJumping = false;
+        avatar.color = data.avatar ? data.avatar.color : avatar.color;
+        avatar.emote = null;
+        avatar.emoteTimer = 0;
+        avatar.attackCooldown = 0;
+        avatar.targetId = null;
+        break;
+    }
+  });
+
+  // Avatar entfernt
+  socket.on('avatarRemove', (data) => {
+    const avatar = avatars.get(data.id);
     if (avatar) {
       addExplosion(avatar.x + avatar.width / 2, avatar.y + avatar.height / 2, '#888', 6);
+      avatars.delete(data.id);
+      log(`${data.username} entfernt`);
     }
   });
 
-  socket.on('avatarJumped', (data) => {
-    const avatar = avatars.get(data.username.toLowerCase());
-    if (avatar && !avatar.isJumping) {
-      avatar.isJumping = true;
-      avatar.jumpStartTime = Date.now();
-      avatar.state = 'jumping';
-    }
+  // Avatar beigetreten (nur für visuellen Effekt)
+  socket.on('avatarJoined', (data) => {
+    // Effekt wird bereits in avatarSpawn behandelt
   });
 
+  // Battle Royale Start
   socket.on('battleRoyaleStart', (data) => {
     battleRoyaleActive = true;
     battleRoyaleZone = data.zone;
     lastShrinkTime = Date.now();
+    log('Battle Royale gestartet!');
   });
 
+  // Battle Royale Ende
   socket.on('battleRoyaleEnd', () => {
     battleRoyaleActive = false;
     battleRoyaleZone = null;
+    log('Battle Royale beendet');
   });
 
-  socket.on('nuke', (data) => { addNukeEffect(data.explosions); });
+  // Nuke
+  socket.on('nuke', (data) => {
+    addNukeEffect(data.explosions);
+    avatars.clear();
+    battleRoyaleActive = false;
+    battleRoyaleZone = null;
+    log('NUKE!');
+  });
+
+  // Alle löschen
+  socket.on('clearAll', () => {
+    avatars.clear();
+    battleRoyaleActive = false;
+    battleRoyaleZone = null;
+    log('Alle Avatare entfernt');
+  });
 
   // ---------------------------------------------------------------------------
   // Sprite Discovery
@@ -699,7 +870,7 @@
         }
       }
     } catch (e) {
-      console.log('[Overlay] No custom sprites, using fallback');
+      log('Keine Custom-Sprites gefunden');
     }
   }
   discoverSprites();

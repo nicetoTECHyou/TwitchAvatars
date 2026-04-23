@@ -16,8 +16,6 @@
       --accent-hover: #9b7fff;
       --twitch: #9146FF;
       --twitch-dark: #7c3aed;
-      --kick: #53FC18;
-      --kick-dark: #3dcc10;
       --danger: #ff4757;
       --danger-hover: #ff6b81;
       --success: #2ed573;
@@ -68,12 +66,11 @@
     .status-badge.online .dot { background: var(--success); box-shadow: 0 0 6px var(--success); }
     .status-badge.offline .dot { background: var(--danger); }
     .status-badge.twitch-badge { background: rgba(145, 70, 255, 0.15); color: var(--twitch); border: 1px solid rgba(145, 70, 255, 0.3); }
-    .status-badge.kick-badge { background: rgba(83, 252, 24, 0.1); color: var(--kick); border: 1px solid rgba(83, 252, 24, 0.3); }
     .status-badge.ws-badge { background: rgba(124, 92, 252, 0.15); color: var(--accent); border: 1px solid rgba(124, 92, 252, 0.3); }
 
     .layout {
       display: grid;
-      grid-template-columns: 300px 1fr 320px;
+      grid-template-columns: 280px 1fr 300px;
       gap: 0;
       height: calc(100vh - 53px);
     }
@@ -127,8 +124,6 @@
     .btn-outline:hover { background: var(--surface2); }
     .btn-twitch { background: var(--twitch); color: #fff; }
     .btn-twitch:hover { background: var(--twitch-dark); }
-    .btn-kick { background: #1a1a1a; color: var(--kick); border: 1px solid var(--kick); }
-    .btn-kick:hover { background: #2a2a2a; }
     .btn-sm { padding: 5px 10px; font-size: 11px; }
 
     /* Connection Cards */
@@ -140,7 +135,6 @@
       background: var(--surface2);
     }
     .conn-card.twitch-card { border-color: rgba(145, 70, 255, 0.3); }
-    .conn-card.kick-card { border-color: rgba(83, 252, 24, 0.3); }
 
     .conn-card .conn-header {
       display: flex;
@@ -153,7 +147,6 @@
       font-size: 14px;
     }
     .conn-card.twitch-card .conn-header .label { color: var(--twitch); }
-    .conn-card.kick-card .conn-header .label { color: var(--kick); }
 
     .conn-status {
       display: inline-flex;
@@ -348,7 +341,6 @@
     .log-entry .time { color: var(--text-muted); flex-shrink: 0; }
     .log-entry .msg { color: var(--text); word-break: break-word; }
     .log-entry .msg.twitch { color: var(--twitch); }
-    .log-entry .msg.kick { color: var(--kick); }
     .log-entry .msg.system { color: var(--accent); }
     .log-entry .msg.error { color: var(--danger); }
     .log-entry .msg.success { color: var(--success); }
@@ -389,11 +381,10 @@
 <body>
 
 <div class="header">
-  <h1>Avatar Stream System v0.0.2</h1>
+  <h1>Avatar Stream System v0.0.3</h1>
   <div class="status">
     <span class="status-badge ws-badge online" id="wsBadge"><span class="dot"></span>WebSocket</span>
     <span class="status-badge twitch-badge offline" id="twitchBadge"><span class="dot"></span>Twitch</span>
-    <span class="status-badge kick-badge offline" id="kickBadge"><span class="dot"></span>Kick</span>
   </div>
 </div>
 
@@ -410,20 +401,7 @@
       <input type="text" id="twitchChannel" placeholder="Kanalname (ohne #)" value="">
       <button class="btn btn-twitch btn-sm" style="width:100%" onclick="connectTwitch()" id="twitchConnBtn">Verbinden</button>
       <div class="conn-error" id="twitchError"></div>
-      <div class="conn-mode" id="twitchMode">Anonymer Leser-Modus (kein Token noetig)</div>
-    </div>
-
-    <!-- KICK LOGIN -->
-    <h2>Kick Chat</h2>
-    <div class="conn-card kick-card">
-      <div class="conn-header">
-        <span class="label">Kick</span>
-        <span class="conn-status offline" id="kickStatus"><span class="dot"></span>Offline</span>
-      </div>
-      <input type="text" id="kickChannel" placeholder="Kick-Kanalname" value="">
-      <button class="btn btn-kick btn-sm" style="width:100%" onclick="connectKick()" id="kickConnBtn">Verbinden</button>
-      <div class="conn-error" id="kickError"></div>
-      <div class="conn-mode" id="kickMode">Automatisch: Pusher WebSocket oder Polling</div>
+      <div class="conn-mode">Anonymer Leser-Modus (kein Token noetig)</div>
     </div>
 
     <!-- ACTIONS -->
@@ -443,30 +421,39 @@
     <h2>Befehle testen</h2>
     <div class="btn-group">
       <div class="btn-row">
-        <button class="btn btn-twitch btn-sm" onclick="testCmd('twitch', '!join')">!join</button>
-        <button class="btn btn-twitch btn-sm" onclick="testCmd('twitch', '!jump')">!jump</button>
-        <button class="btn btn-twitch btn-sm" onclick="testCmd('twitch', '!dance')">!dance</button>
+        <button class="btn btn-twitch btn-sm" onclick="testCmd('!join')">!join</button>
+        <button class="btn btn-twitch btn-sm" onclick="testCmd('!jump')">!jump</button>
+        <button class="btn btn-twitch btn-sm" onclick="testCmd('!dance')">!dance</button>
       </div>
       <div class="btn-row">
-        <button class="btn btn-twitch btn-sm" onclick="testCmd('twitch', '!heal')">!heal</button>
-        <button class="btn btn-twitch btn-sm" onclick="testCmd('twitch', '!wave')">!wave</button>
-        <button class="btn btn-twitch btn-sm" onclick="testCmd('twitch', '!sit')">!sit</button>
+        <button class="btn btn-twitch btn-sm" onclick="testCmd('!heal')">!heal</button>
+        <button class="btn btn-twitch btn-sm" onclick="testCmd('!wave')">!wave</button>
+        <button class="btn btn-twitch btn-sm" onclick="testCmd('!sit')">!sit</button>
       </div>
       <div class="btn-row">
-        <button class="btn btn-twitch btn-sm" onclick="testCmd('twitch', '!grow')">!grow</button>
-        <button class="btn btn-twitch btn-sm" onclick="testCmd('twitch', '!shrink')">!shrink</button>
-        <button class="btn btn-twitch btn-sm" onclick="testCmd('twitch', '!flip')">!flip</button>
+        <button class="btn btn-twitch btn-sm" onclick="testCmd('!grow')">!grow</button>
+        <button class="btn btn-twitch btn-sm" onclick="testCmd('!shrink')">!shrink</button>
+        <button class="btn btn-twitch btn-sm" onclick="testCmd('!flip')">!flip</button>
       </div>
       <div class="btn-row">
-        <button class="btn btn-twitch btn-sm" onclick="testCmd('twitch', '!color red')">!color</button>
-        <button class="btn btn-twitch btn-sm" onclick="testCmd('twitch', '!speed 3')">!speed</button>
-        <button class="btn btn-twitch btn-sm" onclick="testCmd('twitch', '!leave')">!leave</button>
+        <button class="btn btn-twitch btn-sm" onclick="testCmd('!color red')">!color</button>
+        <button class="btn btn-twitch btn-sm" onclick="testCmd('!speed 3')">!speed</button>
+        <button class="btn btn-twitch btn-sm" onclick="testCmd('!leave')">!leave</button>
       </div>
       <div class="btn-row">
-        <button class="btn btn-twitch btn-sm" onclick="testCmd('twitch', '!attack')">!attack</button>
-        <button class="btn btn-twitch btn-sm" onclick="testCmd('twitch', '!reset')">!reset</button>
+        <button class="btn btn-twitch btn-sm" onclick="testCmd('!attack')">!attack</button>
+        <button class="btn btn-twitch btn-sm" onclick="testCmd('!reset')">!reset</button>
         <button class="btn btn-twitch btn-sm" onclick="testAllJump()">Alle !jump</button>
       </div>
+    </div>
+
+    <h2>Chat-Simulator</h2>
+    <div class="chat-sim">
+      <div class="input-group">
+        <input type="text" id="chatUser" placeholder="Username" value="TestViewer">
+        <input type="text" id="chatMsg" placeholder="!join" value="!join">
+      </div>
+      <button class="btn btn-primary btn-sm" style="width:100%" onclick="sendChatSim()">Senden</button>
     </div>
 
     <h2>Einstellungen</h2>
@@ -488,7 +475,6 @@
       <div class="stat"><div class="value" id="statTotal">0</div><div class="label">Avatare</div></div>
       <div class="stat"><div class="value" id="statAlive">0</div><div class="label">Lebend</div></div>
       <div class="stat"><div class="value" id="statTwitch">0</div><div class="label">Twitch</div></div>
-      <div class="stat"><div class="value" id="statKick">0</div><div class="label">Kick</div></div>
     </div>
 
     <div id="brBanner" style="display:none" class="br-banner">
@@ -498,7 +484,7 @@
 
     <div id="avatarContainer">
       <div class="empty-state">
-        <div class="icon">🎮</div>
+        <div class="icon">&#127918;</div>
         <p>Noch keine Avatare. Sende <strong>!join</strong> im Chat oder klicke auf "Test-Avatar".</p>
       </div>
     </div>
@@ -506,15 +492,6 @@
 
   <!-- Right Panel -->
   <div class="right-panel">
-    <h2>Kick-Simulator</h2>
-    <div class="chat-sim">
-      <div class="input-group">
-        <input type="text" id="kickUser" placeholder="Username" value="KickViewer">
-        <input type="text" id="kickMsg" placeholder="!join" value="!join">
-      </div>
-      <button class="btn btn-kick btn-sm" style="width:100%" onclick="sendKickSim()">Kick-Chat senden</button>
-    </div>
-
     <h2>Ereignislog</h2>
     <div class="log-container" id="logContainer"></div>
 
@@ -565,45 +542,54 @@ socket.on('init', (data) => {
     if (data.config.twitch?.channels?.[0]) {
       document.getElementById('twitchChannel').value = data.config.twitch.channels[0];
     }
-    if (data.config.kick?.channel) {
-      document.getElementById('kickChannel').value = data.config.kick.channel;
-    }
   }
   if (data.connStatus) updateConnUI(data.connStatus);
   refreshUI();
 });
 
-socket.on('stateUpdate', (data) => {
-  state.avatars = data.avatars || [];
-  state.battleRoyaleActive = data.battleRoyaleActive || false;
-  refreshUI();
+socket.on('avatarSpawn', (data) => {
+  // Avatar wurde gespawnt — State aktualisieren
+  addLog(`${data.username} beigetreten (${data.platform})`, data.platform === 'twitch' ? 'twitch' : 'system');
+  fetchState();
+});
+
+socket.on('avatarAction', (data) => {
+  addLog(`${data.username}: ${data.action}`, 'system');
+  fetchState();
+});
+
+socket.on('avatarRemove', (data) => {
+  addLog(`${data.username} entfernt`, 'system');
+  fetchState();
 });
 
 socket.on('connStatus', (status) => {
   updateConnUI(status);
 });
 
-socket.on('avatarJoined', (data) => {
-  addLog(`${data.username} beigetreten (${data.platform})`, data.platform === 'kick' ? 'kick' : 'twitch');
-});
-
 socket.on('chatMessage', (data) => {
-  const cls = data.platform === 'kick' ? 'kick' : data.platform === 'twitch' ? 'twitch' : 'system';
+  const cls = data.platform === 'twitch' ? 'twitch' : 'system';
   addLog(`[${data.platform}] ${data.username}: ${data.command}`, cls);
 });
 
 socket.on('battleRoyaleStart', () => {
   addLog('Battle Royale gestartet!', 'system');
-  refreshUI();
+  fetchState();
 });
 
 socket.on('battleRoyaleEnd', () => {
   addLog('Battle Royale beendet', 'system');
-  refreshUI();
+  fetchState();
 });
 
 socket.on('nuke', () => {
   addLog('NUKE ausgeloest!', 'error');
+  fetchState();
+});
+
+socket.on('clearAll', () => {
+  addLog('Alle Avatare entfernt', 'system');
+  fetchState();
 });
 
 // ---------------------------------------------------------------------------
@@ -643,35 +629,6 @@ function updateConnUI(status) {
     }
     if (ts.channel) document.getElementById('twitchChannel').value = ts.channel;
   }
-
-  // Kick
-  const ks = status.kick;
-  if (ks) {
-    const kStatus = document.getElementById('kickStatus');
-    const kBtn = document.getElementById('kickConnBtn');
-    const kErr = document.getElementById('kickError');
-    const kMode = document.getElementById('kickMode');
-
-    if (ks.connected) {
-      kStatus.className = 'conn-status online';
-      kStatus.innerHTML = '<span class="dot"></span>Online';
-      kBtn.textContent = 'Trennen';
-      kBtn.onclick = disconnectKick;
-      kErr.textContent = '';
-      kMode.textContent = ks.mode ? `Modus: ${ks.mode}` : '';
-      updateBadge('kickBadge', true);
-    } else {
-      kStatus.className = 'conn-status offline';
-      kStatus.innerHTML = '<span class="dot"></span>Offline';
-      kBtn.textContent = 'Verbinden';
-      kBtn.onclick = connectKick;
-      if (ks.error) kErr.textContent = ks.error;
-      else kErr.textContent = '';
-      kMode.textContent = 'Automatisch: Pusher WebSocket oder Polling';
-      updateBadge('kickBadge', false);
-    }
-    if (ks.channel) document.getElementById('kickChannel').value = ks.channel;
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -681,12 +638,10 @@ function refreshUI() {
   const avatars = state.avatars;
   const alive = avatars.filter(a => a.state !== 'dead');
   const twitchCount = avatars.filter(a => a.platform === 'twitch').length;
-  const kickCount = avatars.filter(a => a.platform === 'kick').length;
 
   document.getElementById('statTotal').textContent = avatars.length;
   document.getElementById('statAlive').textContent = alive.length;
   document.getElementById('statTwitch').textContent = twitchCount;
-  document.getElementById('statKick').textContent = kickCount;
 
   const brBanner = document.getElementById('brBanner');
   brBanner.style.display = state.battleRoyaleActive ? 'block' : 'none';
@@ -697,14 +652,14 @@ function refreshUI() {
 
   const container = document.getElementById('avatarContainer');
   if (avatars.length === 0) {
-    container.innerHTML = '<div class="empty-state"><div class="icon">🎮</div><p>Noch keine Avatare. Sende <strong>!join</strong> im Chat oder klicke auf "Test-Avatar".</p></div>';
+    container.innerHTML = '<div class="empty-state"><div class="icon">&#127918;</div><p>Noch keine Avatare. Sende <strong>!join</strong> im Chat oder klicke auf "Test-Avatar".</p></div>';
     return;
   }
 
   container.innerHTML = `<div class="avatar-grid">${avatars.map(a => {
     const hpRatio = Math.max(0, a.hp / a.maxHp);
     const hpColor = hpRatio > 0.5 ? '#2ed573' : hpRatio > 0.25 ? '#ffa502' : '#ff4757';
-    const platformColor = a.platform === 'twitch' ? '#9146FF' : a.platform === 'kick' ? '#53FC18' : '#888';
+    const platformColor = a.platform === 'twitch' ? '#9146FF' : '#888';
     const initial = a.username.charAt(0).toUpperCase();
     const isDead = a.state === 'dead';
     return `<div class="avatar-card ${isDead ? 'dead' : ''}">
@@ -730,6 +685,17 @@ function refreshUI() {
 // ---------------------------------------------------------------------------
 // Actions
 // ---------------------------------------------------------------------------
+async function fetchState() {
+  try {
+    const res = await fetch('/api/state');
+    const data = await res.json();
+    state.avatars = data.avatars || [];
+    state.battleRoyaleActive = data.battleRoyaleActive || false;
+    if (data.connStatus) updateConnUI(data.connStatus);
+    refreshUI();
+  } catch {}
+}
+
 async function connectTwitch() {
   const channel = document.getElementById('twitchChannel').value.trim();
   if (!channel) { addLog('Twitch: Kanalname eingeben!', 'error'); return; }
@@ -743,21 +709,6 @@ async function connectTwitch() {
 async function disconnectTwitch() {
   addLog('Twitch: Verbindung getrennt', 'twitch');
   await fetch('/api/twitch/disconnect', { method: 'POST' });
-}
-
-async function connectKick() {
-  const channel = document.getElementById('kickChannel').value.trim();
-  if (!channel) { addLog('Kick: Kanalname eingeben!', 'error'); return; }
-  addLog(`Kick: Verbinde mit ${channel}...`, 'kick');
-  await fetch('/api/kick/connect', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ channel })
-  });
-}
-
-async function disconnectKick() {
-  addLog('Kick: Verbindung getrennt', 'kick');
-  await fetch('/api/kick/disconnect', { method: 'POST' });
 }
 
 async function spawnTestAvatar() {
@@ -806,20 +757,10 @@ function sendCmd(username, command) {
   socket.emit('chatCommand', { username, command, platform: 'admin' });
 }
 
-function testCmd(platform, command) {
-  const names = platform === 'twitch'
-    ? ['TwitchFan', 'StreamViewer', 'ChatUser', 'NightOwl', 'PixelGamer']
-    : ['KickFan', 'KickViewer', 'KickChatter', 'KickLurker'];
+function testCmd(command) {
+  const names = ['TwitchFan', 'StreamViewer', 'ChatUser', 'NightOwl', 'PixelGamer'];
   const name = names[Math.floor(Math.random() * names.length)] + Math.floor(Math.random() * 99);
-
-  if (command === '!join') {
-    fetch('/api/kick-sim', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: name, message: command })
-    });
-  } else {
-    socket.emit('chatCommand', { username: name, command, platform });
-  }
+  socket.emit('chatCommand', { username: name, command, platform: 'twitch' });
 }
 
 function testAllJump() {
@@ -828,14 +769,11 @@ function testAllJump() {
   }
 }
 
-async function sendKickSim() {
-  const username = document.getElementById('kickUser').value || 'KickViewer';
-  const message = document.getElementById('kickMsg').value || '!join';
-  await fetch('/api/kick-sim', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, message })
-  });
-  addLog(`${username}: ${message}`, 'kick');
+function sendChatSim() {
+  const username = document.getElementById('chatUser').value || 'TestViewer';
+  const message = document.getElementById('chatMsg').value || '!join';
+  socket.emit('chatCommand', { username, command: message, platform: 'twitch' });
+  addLog(`${username}: ${message}`, 'twitch');
 }
 
 async function updateConfig() {
@@ -864,18 +802,9 @@ function addLog(message, type) {
 }
 
 // ---------------------------------------------------------------------------
-// Poll state + connection status
+// Poll state
 // ---------------------------------------------------------------------------
-setInterval(async () => {
-  try {
-    const res = await fetch('/api/state');
-    const data = await res.json();
-    state.avatars = data.avatars || [];
-    state.battleRoyaleActive = data.battleRoyaleActive || false;
-    if (data.connStatus) updateConnUI(data.connStatus);
-    refreshUI();
-  } catch {}
-}, 2500);
+setInterval(fetchState, 2500);
 </script>
 </body>
 </html>
