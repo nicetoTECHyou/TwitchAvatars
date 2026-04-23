@@ -1,0 +1,15 @@
+{
+  "name": "default",
+  "columns": 4,
+  "rows": 4,
+  "frameWidth": 64,
+  "frameHeight": 64,
+  "animations": {
+    "idle":      { "row": 0, "frames": [0, 1, 2, 3], "speed": 150 },
+    "walking":   { "row": 1, "frames": [0, 1, 2, 3], "speed": 120 },
+    "jumping":   { "row": 2, "frames": [0, 1, 2, 3], "speed": 100 },
+    "attacking": { "row": 3, "frames": [0, 1, 2, 3], "speed": 80  },
+    "dancing":   { "row": 0, "frames": [0, 1, 2, 3], "speed": 100 },
+    "dead":      { "row": 3, "frames": [3], "speed": 0 }
+  }
+}

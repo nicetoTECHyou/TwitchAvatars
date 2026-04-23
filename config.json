@@ -1,0 +1,39 @@
+{
+  "twitch": {
+    "enabled": true,
+    "channels": ["dein_twitch_kanal"]
+  },
+  "kick": {
+    "enabled": false,
+    "channel": "dein_kick_kanal"
+  },
+  "overlay": {
+    "width": 1920,
+    "height": 1080,
+    "fps": 60,
+    "backgroundColor": "transparent"
+  },
+  "avatar": {
+    "defaultSpeed": 2,
+    "jumpHeight": 120,
+    "jumpDuration": 500,
+    "size": 64,
+    "spriteColumns": 4,
+    "spriteRows": 4,
+    "animationSpeed": 150
+  },
+  "battleRoyale": {
+    "enabled": false,
+    "damagePerHit": 10,
+    "attackRange": 60,
+    "attackCooldown": 800,
+    "shrinkSpeed": 0.5,
+    "shrinkInterval": 5000
+  },
+  "commands": {
+    "join": "!join",
+    "jump": "!jump",
+    "attack": "!attack",
+    "dance": "!dance"
+  }
+}
