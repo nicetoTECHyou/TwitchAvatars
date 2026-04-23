@@ -1,15 +1,13 @@
 @echo off
 title Avatar Stream System - Server
 echo ============================================
-echo    Avatar Stream System v0.0.1
+echo    Avatar Stream System v0.0.2
 echo ============================================
 echo.
-echo Pruefe Installation...
 if not exist "node_modules" (
     echo [WARNUNG] node_modules nicht gefunden!
-    echo Fuehre zuerst install.bat aus.
+    echo Fuehre automatisch install.bat aus...
     echo.
-    echo Installiere automatisch...
     call npm install
     if %errorlevel% neq 0 (
         echo [FEHLER] Installation fehlgeschlagen!
@@ -22,6 +20,9 @@ echo Starte Server...
 echo.
 echo    Overlay:  http://localhost:3000/overlay
 echo    Admin:    http://localhost:3000/admin
+echo.
+echo Chat-Befehle: !join !jump !dance !attack !color !heal
+echo               !speed !grow !shrink !wave !sit !flip !emote !leave !reset
 echo.
 echo Druecke STRG+C zum Beenden.
 echo ============================================

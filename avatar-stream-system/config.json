@@ -1,11 +1,11 @@
 {
   "twitch": {
-    "enabled": true,
-    "channels": ["dein_twitch_kanal"]
+    "enabled": false,
+    "channels": [""]
   },
   "kick": {
     "enabled": false,
-    "channel": "dein_kick_kanal"
+    "channel": ""
   },
   "overlay": {
     "width": 1920,

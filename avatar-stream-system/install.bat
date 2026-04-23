@@ -1,7 +1,7 @@
 @echo off
 title Avatar Stream System - Installer
 echo ============================================
-echo    Avatar Stream System - Installation
+echo    Avatar Stream System v0.0.2
 echo ============================================
 echo.
 echo Pruefe Node.js...
@@ -27,6 +27,10 @@ echo ============================================
 echo    Installation abgeschlossen!
 echo ============================================
 echo.
-echo Starte den Server mit: start.bat
+echo Naechste Schritte:
+echo   1. start.bat ausfuehren
+echo   2. http://localhost:3000/admin oeffnen
+echo   3. Twitch/Kick Kanal eintragen und verbinden
+echo   4. http://localhost:3000/overlay in OBS als Browser-Quelle
 echo.
 pause
