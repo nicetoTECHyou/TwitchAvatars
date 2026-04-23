@@ -1,0 +1,710 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Avatar Stream Overlay</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: transparent; }
+    canvas { display: block; width: 100%; height: 100%; background: transparent; }
+  </style>
+</head>
+<body>
+<canvas id="overlay"></canvas>
+<script src="/socket.io/socket.io.js"></script>
+<script>
+(function() {
+  'use strict';
+
+  const canvas = document.getElementById('overlay');
+  const ctx = canvas.getContext('2d', { alpha: true });
+  let W = 1920, H = 1080;
+
+  function resizeCanvas() {
+    W = window.innerWidth;
+    H = window.innerHeight;
+    canvas.width = W;
+    canvas.height = H;
+  }
+  resizeCanvas();
+  window.addEventListener('resize', resizeCanvas);
+
+  let config = {
+    avatar: { defaultSpeed: 2, jumpHeight: 120, jumpDuration: 500, size: 64, spriteColumns: 4, spriteRows: 4, animationSpeed: 150 },
+    battleRoyale: { damagePerHit: 10, attackRange: 60, attackCooldown: 800, shrinkSpeed: 0.5, shrinkInterval: 5000 },
+    overlay: { width: 1920, height: 1080 }
+  };
+
+  // ---------------------------------------------------------------------------
+  // Sprite System
+  // ---------------------------------------------------------------------------
+  const spriteCache = new Map();
+
+  function loadSprite(name, src, cols, rows) {
+    if (spriteCache.has(name)) return;
+    const img = new Image();
+    img.onload = () => {
+      spriteCache.set(name, {
+        image: img,
+        cols: cols || config.avatar.spriteColumns,
+        rows: rows || config.avatar.spriteRows,
+        frameWidth: img.width / (cols || config.avatar.spriteColumns),
+        frameHeight: img.height / (rows || config.avatar.spriteRows)
+      });
+    };
+    img.src = src;
+  }
+
+  function drawSprite(avatar, x, y, w, h) {
+    const spriteName = avatar.spriteName;
+    if (!spriteName || !spriteCache.has(spriteName)) return false;
+    const sprite = spriteCache.get(spriteName);
+    let frameCol = 0, frameRow = 0;
+
+    switch (avatar.state) {
+      case 'idle': case 'sitting': frameRow = 0; break;
+      case 'walking': frameRow = 1; break;
+      case 'jumping': case 'waving': frameRow = 2; break;
+      case 'attacking': frameRow = 3; break;
+      case 'dancing': frameRow = 0; break;
+      case 'dead': frameRow = 3; frameCol = sprite.cols - 1; break;
+      default: frameRow = 0;
+    }
+    if (avatar.state !== 'dead') frameCol = avatar.animFrame % sprite.cols;
+
+    ctx.drawImage(sprite.image,
+      frameCol * sprite.frameWidth, frameRow * sprite.frameHeight,
+      sprite.frameWidth, sprite.frameHeight,
+      x, y, w, h
+    );
+    return true;
+  }
+
+  // ---------------------------------------------------------------------------
+  // State
+  // ---------------------------------------------------------------------------
+  const avatars = new Map();
+  let battleRoyaleActive = false;
+  let battleRoyaleZone = null;
+
+  // ---------------------------------------------------------------------------
+  // Effects
+  // ---------------------------------------------------------------------------
+  const effects = [];
+
+  function addExplosion(x, y, color, count) {
+    const particles = [];
+    for (let i = 0; i < (count || 12); i++) {
+      const angle = (Math.PI * 2 / (count || 12)) * i + Math.random() * 0.3;
+      const speed = 2 + Math.random() * 4;
+      particles.push({ x, y, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed, life: 1, size: 3 + Math.random() * 4, color });
+    }
+    effects.push({ type: 'explosion', particles, startTime: Date.now() });
+  }
+
+  function addJoinEffect(x, y, color) {
+    effects.push({ type: 'join', x, y, color, startTime: Date.now(), duration: 600 });
+  }
+
+  function addHitEffect(x, y) {
+    effects.push({ type: 'hit', x, y, startTime: Date.now(), duration: 200 });
+  }
+
+  function addNukeEffect(explosions) {
+    effects.push({ type: 'nuke', explosions, startTime: Date.now(), duration: 1500 });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Physics & AI
+  // ---------------------------------------------------------------------------
+  const GROUND_Y_RATIO = 0.9;
+
+  function getGroundY() {
+    return battleRoyaleZone
+      ? battleRoyaleZone.y + battleRoyaleZone.height * GROUND_Y_RATIO
+      : H * GROUND_Y_RATIO;
+  }
+
+  function updateAvatars(dt) {
+    const groundY = getGroundY();
+    const now = Date.now();
+
+    for (const [id, avatar] of avatars) {
+      if (avatar.state === 'dead') continue;
+
+      // Animation timer
+      avatar.animTimer += dt;
+      if (avatar.animTimer >= config.avatar.animationSpeed) {
+        avatar.animTimer = 0;
+        avatar.animFrame = (avatar.animFrame + 1) % config.avatar.spriteColumns;
+      }
+
+      // Attack cooldown
+      if (avatar.attackCooldown > 0) avatar.attackCooldown -= dt;
+
+      // Emote timer
+      if (avatar.emoteTimer > 0) {
+        avatar.emoteTimer -= dt;
+        if (avatar.emoteTimer <= 0) avatar.emote = null;
+      }
+
+      // Jump physics
+      if (avatar.isJumping) {
+        const elapsed = now - avatar.jumpStartTime;
+        const duration = config.avatar.jumpDuration;
+        if (elapsed >= duration) {
+          avatar.isJumping = false;
+          avatar.vy = 0;
+          avatar.y = groundY - avatar.height;
+          avatar.state = Math.abs(avatar.vx) > 0.3 ? 'walking' : 'idle';
+        } else {
+          const progress = elapsed / duration;
+          avatar.y = (groundY - avatar.height) - config.avatar.jumpHeight * Math.sin(progress * Math.PI);
+        }
+      }
+
+      // Movement
+      if (battleRoyaleActive && avatar.state !== 'dancing' && avatar.state !== 'sitting' && avatar.state !== 'waving') {
+        updateBattleAI(avatar, groundY, now);
+      } else if (avatar.state !== 'sitting' && avatar.state !== 'waving') {
+        // Idle wandering
+        if (!avatar.isJumping && Math.random() < 0.005) {
+          avatar.vx = (Math.random() - 0.5) * (avatar.speed || config.avatar.defaultSpeed) * 2;
+        }
+        if (avatar.state !== 'dancing') {
+          avatar.state = Math.abs(avatar.vx) > 0.3 ? 'walking' : 'idle';
+        }
+      }
+
+      avatar.x += avatar.vx;
+
+      // Direction
+      if (avatar.vx > 0.1) avatar.direction = 1;
+      else if (avatar.vx < -0.1) avatar.direction = -1;
+
+      // Screen edge collision
+      const minX = battleRoyaleZone ? battleRoyaleZone.x : 0;
+      const maxX = battleRoyaleZone
+        ? battleRoyaleZone.x + battleRoyaleZone.width - avatar.width
+        : W - avatar.width;
+
+      if (avatar.x < minX) { avatar.x = minX; avatar.vx = Math.abs(avatar.vx) * 0.8; }
+      if (avatar.x > maxX) { avatar.x = maxX; avatar.vx = -Math.abs(avatar.vx) * 0.8; }
+
+      if (!avatar.isJumping && avatar.y > groundY - avatar.height) {
+        avatar.y = groundY - avatar.height;
+      }
+
+      // Zone damage
+      if (battleRoyaleActive && battleRoyaleZone) {
+        if (avatar.x < battleRoyaleZone.x || avatar.x + avatar.width > battleRoyaleZone.x + battleRoyaleZone.width) {
+          avatar.hp -= 0.05;
+        }
+      }
+
+      // Death
+      if (avatar.hp <= 0) {
+        avatar.hp = 0;
+        avatar.state = 'dead';
+        addExplosion(avatar.x + avatar.width / 2, avatar.y + avatar.height / 2, avatar.color, 20);
+
+        if (battleRoyaleActive) {
+          const alive = Array.from(avatars.values()).filter(a => a.state !== 'dead');
+          if (alive.length <= 1) {
+            battleRoyaleActive = false;
+            if (alive.length === 1) {
+              // Winner announcement effect
+              addExplosion(alive[0].x + alive[0].width / 2, alive[0].y, '#FFD700', 30);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  function updateBattleAI(avatar, groundY, now) {
+    if (!avatar.targetId || !avatars.has(avatar.targetId) || avatars.get(avatar.targetId).state === 'dead') {
+      let nearest = null, nearestDist = Infinity;
+      for (const [id, target] of avatars) {
+        if (id === avatar.id || target.state === 'dead') continue;
+        const dist = Math.abs(target.x - avatar.x);
+        if (dist < nearestDist) { nearestDist = dist; nearest = id; }
+      }
+      avatar.targetId = nearest;
+    }
+    if (!avatar.targetId) return;
+
+    const target = avatars.get(avatar.targetId);
+    if (!target || target.state === 'dead') { avatar.targetId = null; return; }
+
+    const dx = target.x - avatar.x;
+    const dist = Math.abs(dx);
+    const speed = (avatar.speed || config.avatar.defaultSpeed) * 1.5;
+
+    if (dist > config.battleRoyale.attackRange) {
+      avatar.vx = Math.sign(dx) * speed;
+      avatar.state = 'walking';
+    } else {
+      avatar.vx *= 0.5;
+      avatar.state = 'idle';
+      if (avatar.attackCooldown <= 0) {
+        avatar.state = 'attacking';
+        avatar.attackCooldown = config.battleRoyale.attackCooldown;
+        target.hp -= config.battleRoyale.damagePerHit;
+        addHitEffect(target.x + target.width / 2, target.y + target.height / 2);
+        setTimeout(() => { if (avatar.state === 'attacking') avatar.state = 'idle'; }, 300);
+
+        if (!avatar.isJumping && Math.random() < 0.2) {
+          avatar.isJumping = true;
+          avatar.jumpStartTime = Date.now();
+          avatar.state = 'jumping';
+        }
+      }
+    }
+  }
+
+  function updateEffects(dt) {
+    for (let i = effects.length - 1; i >= 0; i--) {
+      const e = effects[i];
+      const elapsed = Date.now() - e.startTime;
+
+      if (e.type === 'explosion') {
+        let allDead = true;
+        for (const p of e.particles) {
+          p.x += p.vx; p.y += p.vy; p.vy += 0.1; p.life -= 0.02;
+          if (p.life > 0) allDead = false;
+        }
+        if (allDead) effects.splice(i, 1);
+      } else if (elapsed > (e.duration || 1500)) {
+        effects.splice(i, 1);
+      }
+    }
+  }
+
+  let lastShrinkTime = 0;
+  function updateBattleRoyaleZone(now) {
+    if (!battleRoyaleActive || !battleRoyaleZone) return;
+    if (now - lastShrinkTime < config.battleRoyale.shrinkInterval) return;
+    lastShrinkTime = now;
+    const shrink = config.battleRoyale.shrinkSpeed * 50;
+    battleRoyaleZone.x += shrink;
+    battleRoyaleZone.y += shrink * 0.5;
+    battleRoyaleZone.width -= shrink * 2;
+    battleRoyaleZone.height -= shrink;
+    if (battleRoyaleZone.width < 200) battleRoyaleZone.width = 200;
+    if (battleRoyaleZone.height < 200) battleRoyaleZone.height = 200;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Rendering
+  // ---------------------------------------------------------------------------
+  function render() {
+    ctx.clearRect(0, 0, W, H);
+
+    if (battleRoyaleActive && battleRoyaleZone) drawBattleZone();
+
+    const sorted = Array.from(avatars.values()).sort((a, b) => a.y - b.y);
+    for (const avatar of sorted) drawAvatar(avatar);
+
+    drawEffects();
+    if (battleRoyaleActive) drawBattleHUD();
+  }
+
+  function drawBattleZone() {
+    const z = battleRoyaleZone;
+    ctx.fillStyle = 'rgba(255, 0, 0, 0.08)';
+    ctx.fillRect(0, 0, W, z.y);
+    ctx.fillRect(0, z.y + z.height, W, H - z.y - z.height);
+    ctx.fillRect(0, z.y, z.x, z.height);
+    ctx.fillRect(z.x + z.width, z.y, W - z.x - z.width, z.height);
+    ctx.strokeStyle = 'rgba(255, 50, 50, 0.6)';
+    ctx.lineWidth = 3;
+    ctx.setLineDash([10, 5]);
+    ctx.strokeRect(z.x, z.y, z.width, z.height);
+    ctx.setLineDash([]);
+  }
+
+  function drawAvatar(avatar) {
+    const x = avatar.x, y = avatar.y, w = avatar.width, h = avatar.height;
+    ctx.save();
+
+    if (avatar.direction === -1) {
+      ctx.translate(x + w, y);
+      ctx.scale(-1, 1);
+    } else {
+      ctx.translate(x, y);
+    }
+
+    const drewSprite = drawSprite(avatar, 0, 0, w, h);
+    if (!drewSprite) drawFallbackCharacter(avatar, w, h);
+
+    ctx.restore();
+
+    // Emote bubble
+    if (avatar.emote) {
+      drawEmoteBubble(avatar);
+    }
+
+    // HP Bar
+    if (battleRoyaleActive && avatar.state !== 'dead') drawHPBar(avatar);
+
+    drawUsername(avatar);
+  }
+
+  function drawFallbackCharacter(avatar, w, h) {
+    const isDead = avatar.state === 'dead';
+    const isAttacking = avatar.state === 'attacking';
+    const isDancing = avatar.state === 'dancing';
+    const isWaving = avatar.state === 'waving';
+    const isSitting = avatar.state === 'sitting';
+
+    if (isDead) ctx.globalAlpha = 0.4;
+
+    // Body
+    ctx.fillStyle = avatar.color;
+    if (isSitting) {
+      ctx.beginPath();
+      ctx.roundRect(w * 0.1, h * 0.45, w * 0.8, h * 0.35, 6);
+      ctx.fill();
+    } else {
+      ctx.beginPath();
+      ctx.roundRect(w * 0.15, h * 0.3, w * 0.7, h * 0.6, 6);
+      ctx.fill();
+    }
+
+    // Head
+    ctx.fillStyle = avatar.color;
+    const headY = isSitting ? h * 0.35 : h * 0.25;
+    ctx.beginPath();
+    ctx.arc(w / 2, headY, w * 0.28, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Eyes
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(w * 0.38, headY - w * 0.03, w * 0.08, 0, Math.PI * 2);
+    ctx.arc(w * 0.62, headY - w * 0.03, w * 0.08, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Pupils
+    ctx.fillStyle = '#222';
+    ctx.beginPath();
+    ctx.arc(w * 0.40, headY - w * 0.03, w * 0.04, 0, Math.PI * 2);
+    ctx.arc(w * 0.64, headY - w * 0.03, w * 0.04, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Dead X eyes
+    if (isDead) {
+      ctx.strokeStyle = '#ff0000';
+      ctx.lineWidth = 2;
+      // Left X
+      ctx.beginPath();
+      ctx.moveTo(w * 0.32, headY - w * 0.08);
+      ctx.lineTo(w * 0.44, headY + w * 0.02);
+      ctx.moveTo(w * 0.44, headY - w * 0.08);
+      ctx.lineTo(w * 0.32, headY + w * 0.02);
+      ctx.stroke();
+      // Right X
+      ctx.beginPath();
+      ctx.moveTo(w * 0.56, headY - w * 0.08);
+      ctx.lineTo(w * 0.68, headY + w * 0.02);
+      ctx.moveTo(w * 0.68, headY - w * 0.08);
+      ctx.lineTo(w * 0.56, headY + w * 0.02);
+      ctx.stroke();
+    }
+
+    // Attack arm
+    if (isAttacking) {
+      ctx.fillStyle = avatar.color;
+      ctx.fillRect(w * 0.85, h * 0.35, w * 0.35, h * 0.1);
+      // Sword/weapon line
+      ctx.fillStyle = '#ccc';
+      ctx.fillRect(w * 1.1, h * 0.32, w * 0.15, h * 0.04);
+    }
+
+    // Dance arms
+    if (isDancing) {
+      const danceOffset = Math.sin(Date.now() * 0.01) * 5;
+      ctx.fillStyle = avatar.color;
+      ctx.fillRect(w * -0.1, h * 0.4 + danceOffset, w * 0.25, h * 0.08);
+      ctx.fillRect(w * 0.85, h * 0.4 - danceOffset, w * 0.25, h * 0.08);
+    }
+
+    // Wave arm
+    if (isWaving) {
+      const waveOffset = Math.sin(Date.now() * 0.015) * 8;
+      ctx.fillStyle = avatar.color;
+      ctx.save();
+      ctx.translate(w * 0.75, h * 0.2);
+      ctx.rotate(-0.5 + waveOffset * 0.05);
+      ctx.fillRect(0, 0, w * 0.12, h * 0.35);
+      ctx.restore();
+    }
+
+    // Platform badge
+    const badgeColor = avatar.platform === 'twitch' ? '#9146FF' : avatar.platform === 'kick' ? '#53FC18' : '#888';
+    ctx.fillStyle = badgeColor;
+    ctx.beginPath();
+    ctx.arc(w * 0.82, h * 0.08, 5, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.globalAlpha = 1;
+  }
+
+  function drawEmoteBubble(avatar) {
+    if (!avatar.emote) return;
+    const cx = avatar.x + avatar.width / 2;
+    const cy = avatar.y - 30;
+    const text = avatar.emote;
+
+    ctx.font = 'bold 12px "Segoe UI", Arial, sans-serif';
+    const metrics = ctx.measureText(text);
+    const bw = metrics.width + 16;
+    const bh = 22;
+
+    // Bubble background
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
+    ctx.beginPath();
+    ctx.roundRect(cx - bw / 2, cy - bh, bw, bh, 6);
+    ctx.fill();
+
+    // Bubble pointer
+    ctx.beginPath();
+    ctx.moveTo(cx - 5, cy);
+    ctx.lineTo(cx, cy + 5);
+    ctx.lineTo(cx + 5, cy);
+    ctx.fill();
+
+    // Text
+    ctx.fillStyle = '#fff';
+    ctx.textAlign = 'center';
+    ctx.fillText(text, cx, cy - 6);
+  }
+
+  function drawHPBar(avatar) {
+    const barW = avatar.width * 1.2;
+    const barH = 6;
+    const barX = avatar.x + (avatar.width - barW) / 2;
+    const barY = avatar.y - 18;
+
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+    ctx.beginPath();
+    ctx.roundRect(barX, barY, barW, barH, 3);
+    ctx.fill();
+
+    const hpRatio = Math.max(0, avatar.hp / avatar.maxHp);
+    const hpColor = hpRatio > 0.5 ? '#4CAF50' : hpRatio > 0.25 ? '#FF9800' : '#F44336';
+    ctx.fillStyle = hpColor;
+    ctx.beginPath();
+    ctx.roundRect(barX, barY, barW * hpRatio, barH, 3);
+    ctx.fill();
+  }
+
+  function drawUsername(avatar) {
+    const isDead = avatar.state === 'dead';
+    ctx.font = 'bold 12px "Segoe UI", Arial, sans-serif';
+    ctx.textAlign = 'center';
+
+    if (isDead) {
+      ctx.fillStyle = 'rgba(255,0,0,0.5)';
+      ctx.fillText(avatar.username, avatar.x + avatar.width / 2, avatar.y - 5);
+      return;
+    }
+
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+    ctx.fillText(avatar.username, avatar.x + avatar.width / 2 + 1, avatar.y - 5);
+    ctx.fillStyle = '#fff';
+    ctx.fillText(avatar.username, avatar.x + avatar.width / 2, avatar.y - 6);
+  }
+
+  function drawEffects() {
+    for (const e of effects) {
+      const elapsed = Date.now() - e.startTime;
+
+      if (e.type === 'explosion') {
+        for (const p of e.particles) {
+          if (p.life <= 0) continue;
+          ctx.globalAlpha = p.life;
+          ctx.fillStyle = p.color;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+      } else if (e.type === 'join') {
+        const progress = elapsed / e.duration;
+        ctx.globalAlpha = 1 - progress;
+        ctx.strokeStyle = e.color;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(e.x, e.y, 30 + progress * 30, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      } else if (e.type === 'hit') {
+        const progress = elapsed / 200;
+        ctx.globalAlpha = 1 - progress;
+        ctx.fillStyle = '#FFEB3B';
+        ctx.font = 'bold 16px Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText('-' + config.battleRoyale.damagePerHit, e.x, e.y - 10 - progress * 20);
+        ctx.globalAlpha = 1;
+      } else if (e.type === 'nuke') {
+        const progress = elapsed / 1500;
+        ctx.fillStyle = `rgba(255, 255, 255, ${Math.max(0, 0.5 - progress)})`;
+        ctx.fillRect(0, 0, W, H);
+        for (const ex of e.explosions) {
+          ctx.globalAlpha = Math.max(0, 1 - progress);
+          ctx.fillStyle = ex.color || '#FF6B6B';
+          ctx.beginPath();
+          ctx.arc(ex.x, ex.y, progress * 80, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+      }
+    }
+  }
+
+  function drawBattleHUD() {
+    const alive = Array.from(avatars.values()).filter(a => a.state !== 'dead').length;
+    const total = avatars.size;
+
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+    ctx.beginPath();
+    ctx.roundRect(W / 2 - 130, 15, 260, 55, 12);
+    ctx.fill();
+
+    ctx.fillStyle = '#FF4444';
+    ctx.font = 'bold 15px "Segoe UI", Arial, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('BATTLE ROYALE', W / 2, 38);
+
+    ctx.fillStyle = '#fff';
+    ctx.font = '13px "Segoe UI", Arial, sans-serif';
+    ctx.fillText(`${alive} / ${total} ueberlebt`, W / 2, 58);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Game Loop
+  // ---------------------------------------------------------------------------
+  let lastTime = performance.now();
+
+  function gameLoop(timestamp) {
+    const dt = Math.min(timestamp - lastTime, 50);
+    lastTime = timestamp;
+    updateAvatars(dt);
+    updateEffects(dt);
+    updateBattleRoyaleZone(Date.now());
+    render();
+    requestAnimationFrame(gameLoop);
+  }
+  requestAnimationFrame(gameLoop);
+
+  // ---------------------------------------------------------------------------
+  // Socket.io
+  // ---------------------------------------------------------------------------
+  const socket = io();
+
+  socket.on('connect', () => { console.log('[Overlay] Connected'); });
+
+  socket.on('init', (data) => {
+    avatars.clear();
+    if (data.config) config = data.config;
+    if (data.avatars) for (const a of data.avatars) avatars.set(a.id, a);
+    battleRoyaleActive = data.battleRoyaleActive || false;
+    battleRoyaleZone = data.battleRoyaleZone || null;
+  });
+
+  socket.on('stateUpdate', (data) => {
+    if (data.avatars) {
+      const serverIds = new Set();
+      for (const a of data.avatars) {
+        serverIds.add(a.id);
+        const existing = avatars.get(a.id);
+        if (existing) {
+          existing.hp = a.hp;
+          existing.maxHp = a.maxHp;
+          existing.state = a.state;
+          existing.isJumping = a.isJumping;
+          existing.jumpStartTime = a.jumpStartTime;
+          existing.attackCooldown = a.attackCooldown;
+          existing.targetId = a.targetId;
+          existing.color = a.color;
+          existing.username = a.username;
+          existing.platform = a.platform;
+          existing.direction = a.direction;
+          existing.width = a.width;
+          existing.height = a.height;
+          existing.speed = a.speed;
+          existing.emote = a.emote;
+          existing.emoteTimer = a.emoteTimer;
+          existing.x += (a.x - existing.x) * 0.3;
+          existing.y += (a.y - existing.y) * 0.3;
+          existing.vx += (a.vx - existing.vx) * 0.2;
+        } else {
+          avatars.set(a.id, a);
+        }
+      }
+      for (const [id] of avatars) {
+        if (!serverIds.has(id)) avatars.delete(id);
+      }
+    }
+    battleRoyaleActive = data.battleRoyaleActive || false;
+    battleRoyaleZone = data.battleRoyaleZone || null;
+  });
+
+  socket.on('avatarJoined', (data) => {
+    addJoinEffect(data.x || W / 2, data.y || H * GROUND_Y_RATIO, data.color);
+  });
+
+  socket.on('avatarLeft', (data) => {
+    const avatar = avatars.get(data.username.toLowerCase());
+    if (avatar) {
+      addExplosion(avatar.x + avatar.width / 2, avatar.y + avatar.height / 2, '#888', 6);
+    }
+  });
+
+  socket.on('avatarJumped', (data) => {
+    const avatar = avatars.get(data.username.toLowerCase());
+    if (avatar && !avatar.isJumping) {
+      avatar.isJumping = true;
+      avatar.jumpStartTime = Date.now();
+      avatar.state = 'jumping';
+    }
+  });
+
+  socket.on('battleRoyaleStart', (data) => {
+    battleRoyaleActive = true;
+    battleRoyaleZone = data.zone;
+    lastShrinkTime = Date.now();
+  });
+
+  socket.on('battleRoyaleEnd', () => {
+    battleRoyaleActive = false;
+    battleRoyaleZone = null;
+  });
+
+  socket.on('nuke', (data) => { addNukeEffect(data.explosions); });
+
+  // ---------------------------------------------------------------------------
+  // Sprite Discovery
+  // ---------------------------------------------------------------------------
+  async function discoverSprites() {
+    try {
+      const res = await fetch('/api/sprites');
+      const data = await res.json();
+      for (const file of data.sprites) {
+        if (file.endsWith('.png')) {
+          loadSprite(file.replace('.png', ''), `/sprites/avatars/${file}`);
+        }
+      }
+    } catch (e) {
+      console.log('[Overlay] No custom sprites, using fallback');
+    }
+  }
+  discoverSprites();
+
+})();
+</script>
+</body>
+</html>

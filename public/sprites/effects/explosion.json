@@ -1,0 +1,10 @@
+{
+  "name": "explosion",
+  "columns": 4,
+  "rows": 1,
+  "frameWidth": 64,
+  "frameHeight": 64,
+  "animations": {
+    "explode": { "row": 0, "frames": [0, 1, 2, 3], "speed": 60 }
+  }
+}
