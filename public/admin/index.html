@@ -389,7 +389,7 @@
 <body>
 
 <div class="header">
-  <h1>Avatar Stream System v0.0.2</h1>
+  <h1>Avatar Stream System v0.0.3</h1>
   <div class="status">
     <span class="status-badge ws-badge online" id="wsBadge"><span class="dot"></span>WebSocket</span>
     <span class="status-badge twitch-badge offline" id="twitchBadge"><span class="dot"></span>Twitch</span>
@@ -573,8 +573,20 @@ socket.on('init', (data) => {
   refreshUI();
 });
 
-socket.on('stateUpdate', (data) => {
-  state.avatars = data.avatars || [];
+socket.on('registryUpdate', (data) => {
+  // Use registry from server (fallback, overlay is primary)
+  if (!overlayAvatars.length) {
+    state.avatars = data.avatars || [];
+    state.battleRoyaleActive = data.battleRoyaleActive || false;
+    refreshUI();
+  }
+});
+
+// Overlay sends its live state — use this for the admin display
+let overlayAvatars = [];
+socket.on('overlayStateUpdate', (data) => {
+  if (data.avatars) overlayAvatars = data.avatars;
+  state.avatars = overlayAvatars;
   state.battleRoyaleActive = data.battleRoyaleActive || false;
   refreshUI();
 });

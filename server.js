@@ -1,5 +1,5 @@
 // ============================================================================
-// Avatar Stream System - Server v0.0.2
+// Avatar Stream System - Server v0.0.3
 // ============================================================================
 const fs = require('fs');
 const path = require('path');
@@ -20,7 +20,7 @@ function saveConfig() {
 }
 
 // ---------------------------------------------------------------------------
-// Connection Status (shared state)
+// Connection Status
 // ---------------------------------------------------------------------------
 const connStatus = {
   twitch: { connected: false, channel: '', error: null },
@@ -45,19 +45,13 @@ const io = new SocketServer(server, {
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json());
 
-app.get('/overlay', (_req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'overlay', 'index.html'));
-});
-app.get('/admin', (_req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'admin', 'index.html'));
-});
+app.get('/overlay', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'overlay', 'index.html')));
+app.get('/admin', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'admin', 'index.html')));
 
 // ---------------------------------------------------------------------------
-// Avatar State
+// Avatar Registry (minimal — just tracks who exists)
 // ---------------------------------------------------------------------------
-const avatars = new Map();
-let battleRoyaleActive = false;
-let battleRoyaleZone = null;
+const avatarRegistry = new Map(); // username -> { id, username, platform, color, hp, maxHp, width, height, state }
 
 const AVATAR_COLORS = [
   '#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7',
@@ -75,84 +69,69 @@ const NAMED_COLORS = {
 
 function createAvatar(username, platform = 'twitch') {
   const key = username.toLowerCase();
-  if (avatars.has(key)) {
-    return avatars.get(key);
-  }
+  if (avatarRegistry.has(key)) return avatarRegistry.get(key);
 
-  const colorIndex = avatars.size % AVATAR_COLORS.length;
+  const colorIndex = avatarRegistry.size % AVATAR_COLORS.length;
   const avatar = {
     id: key,
     username: username,
     platform: platform,
-    x: 100 + Math.random() * (config.overlay.width - 200),
-    y: config.overlay.height - 100 - config.avatar.size,
-    vx: (Math.random() - 0.5) * config.avatar.defaultSpeed * 2,
-    vy: 0,
-    width: config.avatar.size,
-    height: config.avatar.size,
     color: AVATAR_COLORS[colorIndex],
     hp: 100,
     maxHp: 100,
-    isJumping: false,
-    jumpStartTime: 0,
-    direction: Math.random() > 0.5 ? 1 : -1,
-    state: 'idle',
-    animFrame: 0,
-    animTimer: 0,
-    attackCooldown: 0,
-    targetId: null,
-    spawnTime: Date.now(),
-    spriteName: null,
-    speed: config.avatar.defaultSpeed,
-    emote: null,
-    emoteTimer: 0
+    width: config.avatar.size,
+    height: config.avatar.size,
+    state: 'idle'
   };
 
-  avatars.set(key, avatar);
-  broadcastState();
+  avatarRegistry.set(key, avatar);
+
+  // Tell overlay to create avatar with initial position
+  io.emit('avatarCreate', {
+    id: key,
+    username: username,
+    platform: platform,
+    color: avatar.color,
+    width: avatar.width,
+    height: avatar.height,
+    speed: config.avatar.defaultSpeed
+  });
+
   return avatar;
 }
 
 function removeAvatar(username) {
   const key = username.toLowerCase();
-  if (avatars.has(key)) {
-    avatars.delete(key);
-    broadcastState();
+  if (avatarRegistry.has(key)) {
+    avatarRegistry.delete(key);
+    io.emit('avatarRemove', { id: key });
   }
 }
 
 // ---------------------------------------------------------------------------
 // Battle Royale Logic
 // ---------------------------------------------------------------------------
-function startBattleRoyale() {
-  if (avatars.size < 2) return false;
-  battleRoyaleActive = true;
-  battleRoyaleZone = {
-    x: 0, y: 0,
-    width: config.overlay.width,
-    height: config.overlay.height
-  };
+let battleRoyaleActive = false;
 
-  for (const avatar of avatars.values()) {
+function startBattleRoyale() {
+  if (avatarRegistry.size < 2) return false;
+  battleRoyaleActive = true;
+  // Reset all HP
+  for (const avatar of avatarRegistry.values()) {
     avatar.hp = 100;
     avatar.maxHp = 100;
     avatar.state = 'idle';
-    avatar.targetId = null;
-    avatar.attackCooldown = 0;
-    avatar.x = 100 + Math.random() * (config.overlay.width - 200);
-    avatar.y = config.overlay.height - 100 - avatar.height;
-    avatar.vx = (Math.random() - 0.5) * 4;
   }
-
-  io.emit('battleRoyaleStart', { zone: battleRoyaleZone });
-  broadcastState();
+  io.emit('battleRoyaleStart', {
+    zone: { x: 0, y: 0, width: config.overlay.width, height: config.overlay.height }
+  });
+  broadcastRegistry();
   return true;
 }
 
 function stopBattleRoyale() {
   battleRoyaleActive = false;
-  battleRoyaleZone = null;
-  for (const avatar of avatars.values()) {
+  for (const avatar of avatarRegistry.values()) {
     if (avatar.state === 'dead') {
       avatar.hp = 100;
       avatar.maxHp = 100;
@@ -160,23 +139,22 @@ function stopBattleRoyale() {
     }
   }
   io.emit('battleRoyaleEnd');
-  broadcastState();
+  broadcastRegistry();
 }
 
 function nukeAll() {
-  const explosionEffects = [];
-  for (const avatar of avatars.values()) {
-    explosionEffects.push({ x: avatar.x, y: avatar.y, color: avatar.color });
+  const explosionList = [];
+  for (const [id, avatar] of avatarRegistry) {
+    // We don't know x/y on server — overlay handles it
+    explosionList.push({ id, color: avatar.color });
   }
-  avatars.clear();
+  avatarRegistry.clear();
   battleRoyaleActive = false;
-  battleRoyaleZone = null;
-  io.emit('nuke', { explosions: explosionEffects });
-  broadcastState();
+  io.emit('nuke', { avatars: explosionList });
 }
 
 // ---------------------------------------------------------------------------
-// Chat Command Handler (EXPANDED)
+// Chat Command Handler — EMITS COMMANDS TO OVERLAY, NOT STATE
 // ---------------------------------------------------------------------------
 function handleChatCommand(username, command, platform) {
   const rawCmd = command.trim();
@@ -184,175 +162,148 @@ function handleChatCommand(username, command, platform) {
   const cmd = parts[0].toLowerCase();
   const args = parts.slice(1);
 
-  // Log every chat message for visibility
+  // Log chat messages
   if (cmd.startsWith('!')) {
     io.emit('chatMessage', { username, command: rawCmd, platform, timestamp: Date.now() });
   }
 
-  // --- !join ---
-  if (cmd === config.commands.join) {
+  const key = username.toLowerCase();
+
+  // --- !join (creates avatar) ---
+  if (cmd === config.commands.join || cmd === '!join') {
     const avatar = createAvatar(username, platform);
-    io.emit('avatarJoined', { username, platform, color: avatar.color, x: avatar.x, y: avatar.y });
+    addLog(`[Chat] ${username} joined (${platform})`, platform);
     return;
   }
 
   // All commands below require an existing avatar
-  const avatar = avatars.get(username.toLowerCase());
-  if (!avatar || avatar.state === 'dead') return;
+  const avatar = avatarRegistry.get(key);
+  if (!avatar) return;
 
+  // --- Command dispatch to overlay ---
   switch (cmd) {
-    // --- !jump ---
+    case '!jump':
     case config.commands.jump:
-      if (!avatar.isJumping) {
-        avatar.isJumping = true;
-        avatar.jumpStartTime = Date.now();
-        avatar.state = 'jumping';
-        io.emit('avatarJumped', { username: avatar.username });
-      }
+      io.emit('avatarCommand', { id: key, command: 'jump' });
       break;
 
-    // --- !attack ---
-    case config.commands.attack:
-      if (battleRoyaleActive && avatar.attackCooldown <= 0) {
-        avatar.state = 'attacking';
-        avatar.attackCooldown = config.battleRoyale.attackCooldown;
-        setTimeout(() => {
-          if (avatar.state === 'attacking') avatar.state = 'idle';
-        }, 300);
-      }
-      break;
-
-    // --- !dance ---
+    case '!dance':
     case config.commands.dance:
-      avatar.state = 'dancing';
-      setTimeout(() => {
-        if (avatar.state === 'dancing') avatar.state = 'idle';
-      }, 3000);
+      io.emit('avatarCommand', { id: key, command: 'dance' });
       break;
 
-    // --- !color <color> ---
+    case '!attack':
+    case config.commands.attack:
+      if (battleRoyaleActive) {
+        io.emit('avatarCommand', { id: key, command: 'attack' });
+      }
+      break;
+
     case '!color':
     case '!farbe':
       if (args.length > 0) {
         const colorArg = args[0].toLowerCase();
+        let newColor = null;
         if (NAMED_COLORS[colorArg]) {
-          avatar.color = NAMED_COLORS[colorArg];
+          newColor = NAMED_COLORS[colorArg];
         } else if (/^#[0-9a-f]{3,8}$/i.test(colorArg)) {
-          avatar.color = colorArg;
+          newColor = colorArg;
         } else if (/^[0-9a-f]{6}$/i.test(colorArg)) {
-          avatar.color = '#' + colorArg;
+          newColor = '#' + colorArg;
+        }
+        if (newColor) {
+          avatar.color = newColor;
+          io.emit('avatarCommand', { id: key, command: 'color', value: newColor });
         }
       }
       break;
 
-    // --- !leave / !leave ---
     case '!leave':
     case '!quit':
     case '!raus':
       removeAvatar(username);
-      io.emit('avatarLeft', { username });
+      io.emit('chatMessage', { username: 'System', command: `${username} hat den Stream verlassen`, platform: 'system', timestamp: Date.now() });
       break;
 
-    // --- !heal ---
     case '!heal':
     case '!heilen':
-      if (avatar.hp < avatar.maxHp) {
-        avatar.hp = Math.min(avatar.maxHp, avatar.hp + 20);
-        avatar.emote = '+20 HP';
-        avatar.emoteTimer = 1000;
-      }
+      avatar.hp = Math.min(avatar.maxHp, avatar.hp + 20);
+      io.emit('avatarCommand', { id: key, command: 'heal', value: 20 });
       break;
 
-    // --- !speed <1-5> ---
     case '!speed':
     case '!tempo':
       if (args.length > 0) {
         const spd = parseInt(args[0]);
         if (spd >= 1 && spd <= 5) {
-          avatar.speed = config.avatar.defaultSpeed * spd;
-          avatar.vx = Math.sign(avatar.vx || 1) * avatar.speed;
+          io.emit('avatarCommand', { id: key, command: 'speed', value: spd });
         }
       }
       break;
 
-    // --- !grow ---
     case '!grow':
-    case '!wachsen': {
-      const newSize = Math.min(128, avatar.width + 8);
-      avatar.width = newSize;
-      avatar.height = newSize;
+    case '!wachsen':
+      avatar.width = Math.min(128, avatar.width + 8);
+      avatar.height = Math.min(128, avatar.height + 8);
+      io.emit('avatarCommand', { id: key, command: 'grow' });
       break;
-    }
 
-    // --- !shrink ---
     case '!shrink':
-    case '!kleiner': {
-      const shrinkSize = Math.max(24, avatar.width - 8);
-      avatar.width = shrinkSize;
-      avatar.height = shrinkSize;
+    case '!kleiner':
+      avatar.width = Math.max(24, avatar.width - 8);
+      avatar.height = Math.max(24, avatar.height - 8);
+      io.emit('avatarCommand', { id: key, command: 'shrink' });
       break;
-    }
 
-    // --- !wave ---
     case '!wave':
     case '!winken':
-      avatar.state = 'waving';
-      avatar.emote = 'Wink!';
-      avatar.emoteTimer = 1500;
-      setTimeout(() => {
-        if (avatar.state === 'waving') avatar.state = 'idle';
-      }, 1500);
+      io.emit('avatarCommand', { id: key, command: 'wave' });
       break;
 
-    // --- !sit ---
     case '!sit':
     case '!setzen':
-      avatar.state = 'sitting';
-      avatar.vx = 0;
-      setTimeout(() => {
-        if (avatar.state === 'sitting') avatar.state = 'idle';
-      }, 3000);
+      io.emit('avatarCommand', { id: key, command: 'sit' });
       break;
 
-    // --- !flip ---
     case '!flip':
     case '!drehen':
-      avatar.direction *= -1;
+      io.emit('avatarCommand', { id: key, command: 'flip' });
       break;
 
-    // --- !emote <text> ---
     case '!emote':
     case '!say':
       if (args.length > 0) {
-        avatar.emote = args.join(' ').substring(0, 30);
-        avatar.emoteTimer = 2500;
+        const text = args.join(' ').substring(0, 30);
+        io.emit('avatarCommand', { id: key, command: 'emote', value: text });
       }
       break;
 
-    // --- !reset ---
     case '!reset':
       avatar.hp = 100;
       avatar.maxHp = 100;
       avatar.width = config.avatar.size;
       avatar.height = config.avatar.size;
-      avatar.speed = config.avatar.defaultSpeed;
+      avatar.color = AVATAR_COLORS[avatarRegistry.size % AVATAR_COLORS.length];
       avatar.state = 'idle';
-      avatar.color = AVATAR_COLORS[avatars.size % AVATAR_COLORS.length];
+      io.emit('avatarCommand', { id: key, command: 'reset', value: { hp: 100, width: config.avatar.size, height: config.avatar.size, color: avatar.color } });
       break;
   }
 
-  broadcastState();
+  broadcastRegistry();
+}
+
+// Minimal log helper
+function addLog(msg, platform) {
+  console.log(msg);
 }
 
 // ---------------------------------------------------------------------------
-// Twitch Chat (tmi.js) — FIXED: anonymous login with justinfan identity
+// Twitch Chat (tmi.js) — FIXED: anonymous login
 // ---------------------------------------------------------------------------
 let twitchClient = null;
 
 function connectTwitch() {
-  if (twitchClient) {
-    disconnectTwitch();
-  }
+  if (twitchClient) disconnectTwitch();
 
   const channels = config.twitch.channels.filter(c => c && c.trim() !== '' && c !== 'dein_twitch_kanal');
   if (channels.length === 0) {
@@ -361,13 +312,12 @@ function connectTwitch() {
     return;
   }
 
-  // IMPORTANT: Anonymous login requires a justinfan username + dummy oauth
   twitchClient = new tmi.Client({
-    options: { debug: false, messagesLogLevel: 'info' },
+    options: { debug: false },
     connection: {
       reconnect: true,
       reconnectInterval: 3000,
-      maxReconnectAttempts: 10,
+      maxReconnectAttempts: 15,
       secure: true
     },
     identity: {
@@ -383,8 +333,8 @@ function connectTwitch() {
     handleChatCommand(username, message, 'twitch');
   });
 
-  twitchClient.on('connected', (addr, port) => {
-    console.log('[Twitch] Connected to', addr, port, '- Channels:', channels.join(', '));
+  twitchClient.on('connected', (addr) => {
+    console.log('[Twitch] Connected to', addr, '- Channels:', channels.join(', '));
     connStatus.twitch = { connected: true, channel: channels.join(', '), error: null };
     broadcastStatus();
   });
@@ -395,22 +345,11 @@ function connectTwitch() {
     broadcastStatus();
   });
 
-  twitchClient.on('connecting', () => {
-    console.log('[Twitch] Connecting to channels:', channels.join(', '));
-  });
-
-  twitchClient.on('reconnect', () => {
-    console.log('[Twitch] Reconnecting...');
-  });
-
-  twitchClient.on('join', (channel, username, self) => {
-    if (self) {
-      console.log('[Twitch] Joined channel:', channel);
-    }
-  });
+  twitchClient.on('connecting', () => console.log('[Twitch] Connecting...'));
+  twitchClient.on('join', (channel, username, self) => { if (self) console.log('[Twitch] Joined:', channel); });
 
   twitchClient.connect().catch(err => {
-    console.error('[Twitch] Connection error:', err.message);
+    console.error('[Twitch] Error:', err.message);
     connStatus.twitch = { connected: false, channel: channels.join(', '), error: err.message };
     broadcastStatus();
   });
@@ -426,87 +365,122 @@ function disconnectTwitch() {
 }
 
 // ---------------------------------------------------------------------------
-// Kick Chat Reader — Pusher WebSocket Integration
+// Kick Chat — Pusher WebSocket + Polling Fallback
 // ---------------------------------------------------------------------------
 let kickWs = null;
 let kickPollInterval = null;
-let kickLastMessageId = null;
+let kickLastMessageIds = new Set(); // Track last N message IDs to avoid duplicates
 
 function connectKick() {
   const channel = config.kick.channel;
   if (!channel || channel.trim() === '' || channel === 'dein_kick_kanal') {
-    connStatus.kick = { connected: false, channel: '', error: 'Kein gueltiger Kanal konfiguriert', mode: 'simulator' };
+    connStatus.kick = { connected: false, channel: '', error: 'Kein Kanal konfiguriert', mode: 'simulator' };
     broadcastStatus();
     return;
   }
 
   disconnectKick();
-
   console.log('[Kick] Connecting to channel:', channel);
 
-  // Step 1: Get chatroom ID from Kick API
+  // Step 1: Resolve chatroom ID from Kick API
   const apiUrl = `https://kick.com/api/v2/channels/${channel}`;
 
-  https.get(apiUrl, (res) => {
+  const req = https.get(apiUrl, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      'Accept': 'application/json'
+    }
+  }, (res) => {
+    // Handle redirects
+    if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+      https.get(res.headers.location, (res2) => {
+        let data2 = '';
+        res2.on('data', chunk => data2 += chunk);
+        res2.on('end', () => processKickApiResponse(data2, channel));
+      }).on('error', (e) => {
+        console.error('[Kick] Redirect error:', e.message);
+        startKickPolling(channel);
+      });
+      return;
+    }
+
     let data = '';
     res.on('data', chunk => data += chunk);
-    res.on('end', () => {
-      try {
-        const json = JSON.parse(data);
-        const chatroomId = json.data?.chatroom_id || json.data?.chatroom?.id;
+    res.on('end', () => processKickApiResponse(data, channel));
+  });
 
-        if (!chatroomId) {
-          console.error('[Kick] Could not find chatroom ID for channel:', channel);
-          connStatus.kick = { connected: false, channel, error: 'Chatroom-ID nicht gefunden', mode: 'simulator' };
-          broadcastStatus();
-          // Fallback to polling
-          startKickPolling(channel);
-          return;
-        }
+  req.on('error', (e) => {
+    console.error('[Kick] API error:', e.message);
+    startKickPolling(channel);
+  });
 
-        console.log('[Kick] Found chatroom ID:', chatroomId, '- Starting Pusher connection');
-        connectKickPusher(chatroomId, channel);
-
-      } catch (e) {
-        console.error('[Kick] API parse error:', e.message);
-        connStatus.kick = { connected: false, channel, error: 'API-Fehler: ' + e.message, mode: 'simulator' };
-        broadcastStatus();
-        startKickPolling(channel);
-      }
-    });
-  }).on('error', (e) => {
-    console.error('[Kick] API request error:', e.message);
-    connStatus.kick = { connected: false, channel, error: 'Verbindungsfehler: ' + e.message, mode: 'simulator' };
-    broadcastStatus();
+  req.setTimeout(10000, () => {
+    req.destroy();
+    console.error('[Kick] API timeout');
     startKickPolling(channel);
   });
 }
 
+function processKickApiResponse(data, channel) {
+  try {
+    const json = JSON.parse(data);
+    // Try multiple possible paths
+    const chatroomId = json.data?.chatroom_id || json.data?.chatroom?.id || json.chatroom_id;
+
+    if (!chatroomId) {
+      console.error('[Kick] No chatroom ID found for:', channel);
+      connStatus.kick = { connected: false, channel, error: 'Chatroom-ID nicht gefunden', mode: 'simulator' };
+      broadcastStatus();
+      startKickPolling(channel);
+      return;
+    }
+
+    console.log('[Kick] Chatroom ID:', chatroomId, '- Starting Pusher');
+    connectKickPusher(chatroomId, channel);
+
+  } catch (e) {
+    console.error('[Kick] API parse error:', e.message);
+    connStatus.kick = { connected: false, channel, error: 'API-Fehler', mode: 'simulator' };
+    broadcastStatus();
+    startKickPolling(channel);
+  }
+}
+
 function connectKickPusher(chatroomId, channel) {
   try {
-    // Use Pusher WebSocket protocol
     const WebSocket = require('ws');
+
+    // Pusher connection with proper protocol
     const PUSHER_KEY = '32cbd69e03eb5b3ee65a';
     const PUSHER_URL = `wss://ws-us2.pusher.com/app/${PUSHER_KEY}?protocol=7&client=js&version=7.6.0&flash=false`;
 
     kickWs = new WebSocket(PUSHER_URL);
 
     kickWs.on('open', () => {
-      console.log('[Kick] Pusher WebSocket connected');
-      // Subscribe to chatroom channel
-      const subscribeMsg = JSON.stringify({
+      console.log('[Kick] Pusher connected');
+      kickWs.send(JSON.stringify({
         event: 'pusher:subscribe',
         data: { channel: `chatrooms.${chatroomId}.v2` }
-      });
-      kickWs.send(subscribeMsg);
-
+      }));
       connStatus.kick = { connected: true, channel, error: null, mode: 'pusher' };
       broadcastStatus();
     });
 
     kickWs.on('message', (rawData) => {
       try {
-        const msg = JSON.parse(rawData);
+        const msg = JSON.parse(rawData.toString());
+
+        // Handle pusher internal events
+        if (msg.event === 'pusher:connection_established') {
+          console.log('[Kick] Pusher handshake OK');
+          return;
+        }
+        if (msg.event === 'pusher_internal:subscription_succeeded') {
+          console.log('[Kick] Subscribed to chatroom');
+          return;
+        }
+
+        // Handle chat messages
         if (msg.event === 'App\\Events\\ChatMessageEvent' || msg.event === 'App\\Events\\MessageEvent') {
           const chatData = JSON.parse(msg.data);
           const chatMsg = chatData.content || chatData.message || '';
@@ -517,7 +491,7 @@ function connectKickPusher(chatroomId, channel) {
           }
         }
       } catch (e) {
-        // Ignore parse errors for non-chat messages
+        // Ignore non-JSON or parse errors
       }
     });
 
@@ -529,86 +503,97 @@ function connectKickPusher(chatroomId, channel) {
 
     kickWs.on('close', () => {
       console.log('[Kick] WebSocket closed');
-      connStatus.kick = { connected: false, channel, error: 'Verbindung geschlossen', mode: 'simulator' };
+      connStatus.kick = { connected: false, channel, error: 'Geschlossen', mode: 'simulator' };
       broadcastStatus();
-
-      // Auto-reconnect after 5 seconds
+      // Auto-reconnect
       if (config.kick.enabled) {
-        setTimeout(() => {
-          if (config.kick.enabled) connectKick();
-        }, 5000);
+        setTimeout(() => { if (config.kick.enabled) connectKick(); }, 5000);
       }
     });
 
+    // Ping to keep connection alive
+    const pingInterval = setInterval(() => {
+      if (kickWs && kickWs.readyState === 1) {
+        kickWs.send(JSON.stringify({ event: 'pusher:ping', data: '{}' }));
+      } else {
+        clearInterval(pingInterval);
+      }
+    }, 120000);
+
   } catch (e) {
-    console.error('[Kick] Pusher init error (ws module missing?):', e.message);
-    console.log('[Kick] Falling back to polling mode');
+    console.error('[Kick] Pusher init error:', e.message);
+    console.log('[Kick] Falling back to polling');
     startKickPolling(channel);
   }
 }
 
-// Fallback: Polling mode (less reliable but works without ws module)
 function startKickPolling(channel) {
   if (kickPollInterval) clearInterval(kickPollInterval);
 
   connStatus.kick = { connected: true, channel, error: null, mode: 'polling' };
   broadcastStatus();
+  console.log('[Kick] Polling mode for:', channel);
 
-  console.log('[Kick] Starting polling mode for channel:', channel);
+  // Initial fetch to populate message IDs
+  fetchKickMessages(channel, true);
 
-  kickPollInterval = setInterval(() => {
-    const apiUrl = `https://kick.com/api/v2/channels/${channel}/messages`;
+  // Poll every 3 seconds
+  kickPollInterval = setInterval(() => fetchKickMessages(channel, false), 3000);
+}
 
-    https.get(apiUrl, (res) => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => {
-        try {
-          const json = JSON.parse(data);
-          const messages = json.data?.messages || json.data || [];
+function fetchKickMessages(channel, initial) {
+  const apiUrl = `https://kick.com/api/v2/channels/${channel}/messages`;
 
-          for (const msg of messages) {
-            const msgId = msg.id || msg.message_id;
-            if (msgId && msgId === kickLastMessageId) continue;
+  https.get(apiUrl, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      'Accept': 'application/json'
+    }
+  }, (res) => {
+    let data = '';
+    res.on('data', chunk => data += chunk);
+    res.on('end', () => {
+      try {
+        const json = JSON.parse(data);
+        const messages = json.data?.messages || json.data || [];
 
-            const content = msg.content || '';
-            const username = msg.sender?.username || msg.username || 'Unknown';
+        for (const msg of messages) {
+          const msgId = msg.id || msg.message_id || msg.timestamp;
+          if (msgId && kickLastMessageIds.has(msgId)) continue;
 
-            if (content.startsWith('!')) {
-              handleChatCommand(username, content, 'kick');
-            }
+          const content = msg.content || '';
+          const username = msg.sender?.username || msg.username || 'Unknown';
 
-            if (msgId) kickLastMessageId = msgId;
+          if (!initial && content.startsWith('!')) {
+            handleChatCommand(username, content, 'kick');
           }
-        } catch (e) {
-          // Silently ignore parse errors during polling
+
+          if (msgId) {
+            kickLastMessageIds.add(msgId);
+            // Keep only last 50 IDs
+            if (kickLastMessageIds.size > 50) {
+              const arr = Array.from(kickLastMessageIds);
+              kickLastMessageIds = new Set(arr.slice(-50));
+            }
+          }
         }
-      });
-    }).on('error', () => {
-      // Silently ignore polling errors
+      } catch (e) {}
     });
-  }, 3000); // Poll every 3 seconds
+  }).on('error', () => {});
 }
 
 function disconnectKick() {
-  if (kickWs) {
-    try { kickWs.close(); } catch {}
-    kickWs = null;
-  }
-  if (kickPollInterval) {
-    clearInterval(kickPollInterval);
-    kickPollInterval = null;
-  }
+  if (kickWs) { try { kickWs.close(); } catch {} kickWs = null; }
+  if (kickPollInterval) { clearInterval(kickPollInterval); kickPollInterval = null; }
+  kickLastMessageIds.clear();
   connStatus.kick = { connected: false, channel: '', error: null, mode: 'simulator' };
   broadcastStatus();
 }
 
-// API endpoint for Kick chat simulation (always available)
+// Kick simulator API (always available)
 app.post('/api/kick-sim', (req, res) => {
   const { username, message } = req.body;
-  if (!username || !message) {
-    return res.status(400).json({ error: 'username and message required' });
-  }
+  if (!username || !message) return res.status(400).json({ error: 'username and message required' });
   handleChatCommand(username, message, 'kick');
   res.json({ success: true });
 });
@@ -618,29 +603,25 @@ app.post('/api/kick-sim', (req, res) => {
 // ---------------------------------------------------------------------------
 app.get('/api/state', (_req, res) => {
   res.json({
-    avatars: Array.from(avatars.values()),
+    avatars: Array.from(avatarRegistry.values()),
     battleRoyaleActive,
     connStatus,
     config
   });
 });
 
-app.get('/api/conn-status', (_req, res) => {
-  res.json(connStatus);
-});
+app.get('/api/conn-status', (_req, res) => res.json(connStatus));
 
 app.post('/api/spawn-test', (req, res) => {
-  const { username } = req.body;
-  const name = username || `TestUser_${Math.floor(Math.random() * 999)}`;
+  const name = req.body.username || `TestUser_${Math.floor(Math.random() * 999)}`;
   const avatar = createAvatar(name, 'test');
   res.json({ success: true, avatar });
 });
 
 app.post('/api/battle-royale', (req, res) => {
-  const { action } = req.body;
-  if (action === 'start') {
+  if (req.body.action === 'start') {
     const result = startBattleRoyale();
-    res.json({ success: result, message: result ? 'Battle Royale gestartet!' : 'Mindestens 2 Avatare erforderlich!' });
+    res.json({ success: result, message: result ? 'Battle Royale gestartet!' : 'Mindestens 2 Avatare noetig!' });
   } else {
     stopBattleRoyale();
     res.json({ success: true, message: 'Battle Royale beendet!' });
@@ -649,7 +630,7 @@ app.post('/api/battle-royale', (req, res) => {
 
 app.post('/api/nuke', (_req, res) => {
   nukeAll();
-  res.json({ success: true, message: 'Nuke ausgeloest! Alle Avatare zerstoert!' });
+  res.json({ success: true, message: 'Nuke ausgeloest!' });
 });
 
 app.post('/api/remove-avatar', (req, res) => {
@@ -658,32 +639,27 @@ app.post('/api/remove-avatar', (req, res) => {
 });
 
 app.post('/api/clear-all', (_req, res) => {
-  avatars.clear();
+  avatarRegistry.clear();
   battleRoyaleActive = false;
-  battleRoyaleZone = null;
-  broadcastState();
+  io.emit('clearAll');
   res.json({ success: true });
 });
 
 app.post('/api/config', (req, res) => {
-  const newConfig = req.body;
-  // Deep merge
-  for (const key of Object.keys(newConfig)) {
-    if (typeof newConfig[key] === 'object' && !Array.isArray(newConfig[key]) && config[key]) {
-      config[key] = { ...config[key], ...newConfig[key] };
+  for (const key of Object.keys(req.body)) {
+    if (typeof req.body[key] === 'object' && !Array.isArray(req.body[key]) && config[key]) {
+      config[key] = { ...config[key], ...req.body[key] };
     } else {
-      config[key] = newConfig[key];
+      config[key] = req.body[key];
     }
   }
   saveConfig();
   res.json({ success: true, config });
 });
 
-// Twitch connect/disconnect with channel config
 app.post('/api/twitch/connect', (req, res) => {
-  const { channel } = req.body;
-  if (channel) {
-    config.twitch.channels = [channel];
+  if (req.body.channel) {
+    config.twitch.channels = [req.body.channel];
     config.twitch.enabled = true;
     saveConfig();
   }
@@ -696,11 +672,9 @@ app.post('/api/twitch/disconnect', (_req, res) => {
   res.json({ success: true });
 });
 
-// Kick connect/disconnect with channel config
 app.post('/api/kick/connect', (req, res) => {
-  const { channel } = req.body;
-  if (channel) {
-    config.kick.channel = channel;
+  if (req.body.channel) {
+    config.kick.channel = req.body.channel;
     config.kick.enabled = true;
     saveConfig();
   }
@@ -718,51 +692,44 @@ app.post('/api/kick/disconnect', (_req, res) => {
 app.get('/api/sprites', (_req, res) => {
   const spritesDir = path.join(__dirname, 'public', 'sprites', 'avatars');
   try {
-    const files = fs.readdirSync(spritesDir).filter(f => f.endsWith('.png') || f.endsWith('.json'));
-    res.json({ sprites: files });
-  } catch {
-    res.json({ sprites: [] });
-  }
+    res.json({ sprites: fs.readdirSync(spritesDir).filter(f => f.endsWith('.png') || f.endsWith('.json')) });
+  } catch { res.json({ sprites: [] }); }
 });
 
 // ---------------------------------------------------------------------------
 // Socket.io Events
 // ---------------------------------------------------------------------------
 io.on('connection', (socket) => {
-  console.log(`[Socket] Client connected: ${socket.id}`);
-
   socket.emit('init', {
-    avatars: Array.from(avatars.values()),
+    avatars: Array.from(avatarRegistry.values()),
     battleRoyaleActive,
-    battleRoyaleZone,
     connStatus,
     config
   });
-
   socket.emit('connStatus', connStatus);
 
   socket.on('chatCommand', (data) => {
     handleChatCommand(data.username, data.command, data.platform || 'admin');
   });
 
-  socket.on('disconnect', () => {});
+  // Overlay reports its state back for admin display
+  socket.on('overlayState', (data) => {
+    // Forward to admin panel clients
+    socket.broadcast.emit('overlayStateUpdate', data);
+  });
 });
 
 // ---------------------------------------------------------------------------
-// Broadcast State (throttled)
+// Broadcast Registry (for admin panel, throttled)
 // ---------------------------------------------------------------------------
 let lastBroadcast = 0;
-const BROADCAST_INTERVAL = 16;
-
-function broadcastState() {
+function broadcastRegistry() {
   const now = Date.now();
-  if (now - lastBroadcast < BROADCAST_INTERVAL) return;
+  if (now - lastBroadcast < 200) return; // 5 Hz max for admin
   lastBroadcast = now;
-
-  io.emit('stateUpdate', {
-    avatars: Array.from(avatars.values()),
-    battleRoyaleActive,
-    battleRoyaleZone
+  io.emit('registryUpdate', {
+    avatars: Array.from(avatarRegistry.values()),
+    battleRoyaleActive
   });
 }
 
@@ -773,24 +740,21 @@ const PORT = process.env.PORT || 3000;
 
 server.listen(PORT, () => {
   console.log('');
-  console.log('  ╔══════════════════════════════════════════════════╗');
-  console.log('  ║       Avatar Stream System v0.0.2               ║');
-  console.log('  ╠══════════════════════════════════════════════════╣');
-  console.log(`  ║  Overlay:  http://localhost:${PORT}/overlay          ║`);
-  console.log(`  ║  Admin:    http://localhost:${PORT}/admin            ║`);
-  console.log('  ╠══════════════════════════════════════════════════╣');
-  console.log('  ║  Chat-Befehle:                                   ║');
-  console.log('  ║    !join  !jump  !dance  !attack                 ║');
-  console.log('  ║    !color <farbe>  !leave  !heal                 ║');
-  console.log('  ║    !speed <1-5>  !grow  !shrink                  ║');
-  console.log('  ║    !wave  !sit  !flip  !emote <text>  !reset     ║');
-  console.log('  ╚══════════════════════════════════════════════════╝');
+  console.log('  ============================================');
+  console.log('    Avatar Stream System v0.0.3');
+  console.log('  ============================================');
+  console.log(`    Overlay:  http://localhost:${PORT}/overlay`);
+  console.log(`    Admin:    http://localhost:${PORT}/admin`);
+  console.log('');
+  console.log('    Commands: !join !jump !dance !attack');
+  console.log('              !color !heal !speed !grow !shrink');
+  console.log('              !wave !sit !flip !emote !leave !reset');
+  console.log('  ============================================');
   console.log('');
 
-  // Auto-connect if channels are configured
-  if (config.twitch.enabled && config.twitch.channels.length > 0) {
-    const validChannels = config.twitch.channels.filter(c => c && c !== 'dein_twitch_kanal');
-    if (validChannels.length > 0) connectTwitch();
+  if (config.twitch.enabled && config.twitch.channels?.length > 0) {
+    const valid = config.twitch.channels.filter(c => c && c !== 'dein_twitch_kanal');
+    if (valid.length > 0) connectTwitch();
   }
   if (config.kick.enabled && config.kick.channel && config.kick.channel !== 'dein_kick_kanal') {
     connectKick();
@@ -798,7 +762,6 @@ server.listen(PORT, () => {
 });
 
 process.on('SIGINT', () => {
-  console.log('\n[Server] Shutting down...');
   disconnectTwitch();
   disconnectKick();
   server.close();
